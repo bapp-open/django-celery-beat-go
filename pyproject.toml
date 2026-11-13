@@ -1,18 +1,40 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-gobeat"
 version = "0.1.0"
-description = "Companion Django app for gobeat, a Go replacement for celery beat (django-celery-beat DatabaseScheduler)"
+description = "cron.py periodic jobs for Django + the companion app of gobeat, a small Go replacement for the celery beat process"
 readme = "README.md"
-license = { text = "MIT" }
-requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+keywords = ["django", "celery", "beat", "cron", "scheduler", "periodic tasks", "django-celery-beat"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Django",
+    "Framework :: Django :: 5.2",
+    "Framework :: Django :: 6.0",
+    "Framework :: Celery",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Distributed Computing",
+]
 dependencies = [
-    "Django>=4.2",
+    "Django>=5.2",
     "celery>=5.7,<5.8",
 ]
+
+[project.optional-dependencies]
+# only if you also want django-celery-beat's tables and admin
+django-celery-beat = ["django-celery-beat>=2.8,<2.10"]
+
+[project.urls]
+Homepage = "https://bapp-open.github.io/django-celery-beat-go/"
+Repository = "https://github.com/bapp-open/django-celery-beat-go"
+Issues = "https://github.com/bapp-open/django-celery-beat-go/issues"
 
 [tool.setuptools.packages.find]
 include = ["django_gobeat*"]

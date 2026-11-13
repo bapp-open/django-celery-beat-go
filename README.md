@@ -1,31 +1,60 @@
-# gobeat
+# django-celery-beat-go (gobeat)
 
-A Go service that replaces the `celery beat` process for Django projects.
-Workers and tasks stay exactly as they are; only the beat process changes.
-Periodic jobs come from two places:
+[![ci](https://github.com/bapp-open/django-celery-beat-go/actions/workflows/ci.yml/badge.svg)](https://github.com/bapp-open/django-celery-beat-go/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/django-gobeat)](https://pypi.org/project/django-gobeat/)
+[![image](https://img.shields.io/badge/ghcr.io-django--celery--beat--go-blue)](https://github.com/bapp-open/django-celery-beat-go/pkgs/container/django-celery-beat-go)
 
-* **`cron.py` in your apps** — classes extending `CronInterface`, picked
-  up automatically the way Django picks up `models.py` (stored in
-  gobeat's own table; needs nothing but Celery), and
-* **django-celery-beat's tables** — optional: when that app is installed
-  its `PeriodicTask` rows and admin keep working unchanged, with
-  behaviour identical to `DatabaseScheduler`.
+**gobeat** is a small Go service that replaces the `celery beat` process
+for Django projects. Workers and tasks stay exactly as they are; only the
+scheduler process changes. It comes with **django-gobeat**, a Django app
+that lets you declare periodic jobs in each app's `cron.py`.
 
-* **Small**: one static binary on an empty image (16 MB), ~12 MB RSS in
-  the integration environment (target: under 20 MB).
-* **Safer**: every run is claimed in Postgres (compare-and-swap on
-  `last_run_at`) *before* it is published, the rendered message is kept in
-  a journal until the broker confirms it, and only one replica is active
-  (advisory lock).
-* **Same behaviour**: schedule maths and message bytes are checked
-  against real Celery, case by case (see [Testing](#testing)).
+```sh
+pip install django-gobeat                                   # the Django app
+docker run -e DATABASE_URL=postgres://… ghcr.io/bapp-open/django-celery-beat-go   # the scheduler
+```
+
+## What it does
+
+* **Schedules periodic Celery tasks** from two sources:
+  `cron.py` classes extending `CronInterface` (auto-discovered like
+  `models.py`, stored in gobeat's own table, no django-celery-beat
+  needed), and — optionally — django-celery-beat's `PeriodicTask` rows
+  and admin, with behaviour identical to its `DatabaseScheduler`.
+* **Publishes the same messages Celery does** (protocol v2) to **Redis**
+  or **RabbitMQ**: byte-identical to kombu's, verified against real
+  Celery.
+* **Never double-fires or silently loses a run**: every run is claimed in
+  Postgres before it is published, kept in a journal until the broker
+  confirms it, and only one replica is active at a time.
+* **Stays small**: one static binary on an empty image (16 MB), about
+  12 MB of memory.
+* **Shadow mode**: runs beside Python beat without writing anything, and
+  a tool compares the two dispatch logs before you switch.
+
+## What it does not do
+
+* **Only PostgreSQL** as the Django database; **only Redis and RabbitMQ**
+  as brokers (no SQS, no Redis Sentinel/Cluster, one broker URL).
+* **Only the latest stable Celery** (5.7.x). It refuses to start on other
+  versions instead of guessing.
+* **JSON task messages only**; no pickle/yaml/msgpack serializers, no
+  compression other than gzip/zlib.
+* **No solar schedules.**
+* **It is not a worker and does not run your code**: it never imports the
+  project, so publish signal handlers (Sentry/OpenTelemetry header
+  injection), `task-sent` events, custom `Task.apply_async` and router
+  functions that depend on call arguments are not reproduced.
+* **No built-in result handling**; it only sends tasks.
+
+Anything unsupported is reported with an error that names the task — it
+is skipped, never approximated. Details:
+[Known differences](#known-differences-from-python-beat).
 
 Reference versions: **Celery 5.7.0, kombu 5.7.0, django-celery-beat 2.9.0**
-(latest stable). gobeat tracks the latest stable Celery only and refuses
-to start on anything else — see [Version support](#version-support).
-
-Design notes and the source map (which Python file each behaviour was
-copied from) are in [docs/DESIGN.md](docs/DESIGN.md).
+— see [Version support](#version-support). Design notes and the source
+map (which Python file each behaviour was copied from) are in
+[docs/DESIGN.md](docs/DESIGN.md).
 
 ## How it fits together
 
@@ -80,8 +109,8 @@ class Heartbeat(CronInterface):
 
 ## Migration steps
 
-1. Install the companion app in the Django project (`django-celery-beat`
-   may stay installed or not — gobeat uses its tables only when it is):
+1. `pip install django-gobeat` and add the app (`django-celery-beat` may
+   stay installed or not — gobeat uses its tables only when it is):
 
    ```python
    INSTALLED_APPS += ["django_gobeat"]
@@ -109,7 +138,7 @@ class Heartbeat(CronInterface):
    in dry-run mode; it logs what it would dispatch and writes nothing:
 
    ```sh
-   docker run -e DATABASE_URL=postgres://… -e GOBEAT_DRY_RUN=1 gobeat
+   docker run -e DATABASE_URL=postgres://… -e GOBEAT_DRY_RUN=1 ghcr.io/bapp-open/django-celery-beat-go
    ```
 
    After a day, compare the two logs:
@@ -298,6 +327,16 @@ as a failing golden case.
 | integration | `make integration` | docker compose: Postgres, Redis, RabbitMQ, a Django project, real workers — on both brokers, plus a pass with django-celery-beat not installed |
 | failure injection | `make integration` | database down/up, broker down/up, SIGKILL between claim and publish and between publish and journal mark, network partition, two instances with failover, missed-run policies; clock jumps on a fake clock in `internal/scheduler` |
 | shadow | `make integration` | Python beat and gobeat dry-run side by side, logs compared with `gobeat shadow-diff` |
+
+## Releasing
+
+1. Set the new version in `pyproject.toml` and `django_gobeat/__init__.py`.
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+
+The `release` workflow then runs the test-suite, pushes the image to
+`ghcr.io/bapp-open/django-celery-beat-go` (`:0.2.0`, `:0.2`, `:latest`,
+amd64 + arm64), publishes `django-gobeat` to PyPI (trusted publishing) and
+attaches static binaries to the GitHub release.
 
 ## Development
 

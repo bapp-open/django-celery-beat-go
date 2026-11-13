@@ -1,0 +1,104 @@
+# Release: push a tag vX.Y.Z (matching `version` in pyproject.toml).
+#   - Docker image  -> ghcr.io/<owner>/django-celery-beat-go:X.Y.Z, :X.Y, :latest (amd64 + arm64)
+#   - Python package -> PyPI (django-gobeat), via trusted publishing (no token stored)
+#   - static binaries -> attached to the GitHub release
+name: release
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: tag must match pyproject.toml
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)"
+          src="$(sed -n "s/^__version__ = '\(.*\)'/\1/p" django_gobeat/__init__.py)"
+          echo "tag=$tag pyproject=$pkg django_gobeat=$src"
+          test "$tag" = "$pkg" && test "$tag" = "$src"
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: unit, differential and soak tests
+        run: make test
+
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ needs.verify.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  binaries:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build static binaries
+        run: |
+          mkdir dist
+          for target in linux/amd64 linux/arm64 darwin/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -mod=vendor -trimpath \
+              -ldflags "-s -w -X main.version=${{ needs.verify.outputs.version }}" \
+              -o "dist/gobeat-$os-$arch" ./cmd/gobeat
+          done
+          (cd dist && sha256sum gobeat-* > SHA256SUMS)
+      - name: create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+
+  pypi:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install build && python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1

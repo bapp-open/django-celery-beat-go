@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gobeat — a small, safe replacement for celery beat</title>
+<meta name="description" content="gobeat is a Go service that replaces the celery beat process for Django projects: cron.py jobs, optional django-celery-beat compatibility, claim-before-publish, 12 MB of memory.">
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1c1b19; --muted: #625f58; --line: #e2dfd7;
+    --card: #ffffff; --accent: #0b6e4f; --code-bg: #f1efe9; --no: #9a3412;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --fg: #ecebe6; --muted: #a3a097; --line: #2e2d2a;
+      --card: #1c1c1a; --accent: #5fd0a6; --code-bg: #232320; --no: #f4a27a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 56px 20px 72px; }
+  h1 { font-size: clamp(2rem, 6vw, 3rem); line-height: 1.1; margin: 0 0 12px; letter-spacing: -0.02em; }
+  h2 { font-size: 1.35rem; margin: 48px 0 12px; }
+  p.lead { font-size: 1.2rem; color: var(--muted); margin: 0 0 28px; max-width: 40em; }
+  a { color: var(--accent); }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em; }
+  code { background: var(--code-bg); padding: 0.12em 0.35em; border-radius: 4px; }
+  pre { background: var(--code-bg); padding: 16px 18px; border-radius: 8px; overflow-x: auto; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  .links a {
+    display: inline-block; margin: 0 10px 10px 0; padding: 9px 16px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--card); text-decoration: none; font-weight: 600;
+  }
+  .links a.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .card strong { display: block; margin-bottom: 4px; }
+  .card span { color: var(--muted); font-size: 0.95em; }
+  ul { padding-left: 1.2em; }
+  li { margin: 6px 0; }
+  ul.no li::marker { color: var(--no); }
+  .stats { display: flex; flex-wrap: wrap; gap: 28px; margin: 8px 0 0; }
+  .stats div b { display: block; font-size: 1.7rem; font-variant-numeric: tabular-nums; }
+  .stats div span { color: var(--muted); font-size: 0.9em; }
+  footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>gobeat</h1>
+  <p class="lead">A small Go service that replaces the <code>celery beat</code> process for Django
+    projects. Your workers and tasks stay exactly as they are.</p>
+
+  <p class="links">
+    <a class="primary" href="https://github.com/bapp-open/django-celery-beat-go">Source on GitHub</a>
+    <a href="https://github.com/bapp-open/django-celery-beat-go#readme">Documentation</a>
+    <a href="https://pypi.org/project/django-gobeat/">PyPI: django-gobeat</a>
+    <a href="https://github.com/bapp-open/django-celery-beat-go/pkgs/container/django-celery-beat-go">Docker image</a>
+  </p>
+
+  <div class="stats">
+    <div><b>~12 MB</b><span>memory in use</span></div>
+    <div><b>16 MB</b><span>container image</span></div>
+    <div><b>70,000</b><span>schedule cases checked against Celery</span></div>
+    <div><b>12.4 M</b><span>simulated dispatches, identical to Python beat</span></div>
+  </div>
+
+  <h2>Quick start</h2>
+<pre><code>pip install django-gobeat</code></pre>
+<pre><code># settings.py
+INSTALLED_APPS += ["django_gobeat"]
+
+# myapp/cron.py — discovered automatically, like models.py
+from django_gobeat import CronInterface, crontab
+
+class NightlyCleanup(CronInterface):
+    schedule = crontab(minute=0, hour=4)
+    timezone = "Europe/Bucharest"
+
+    def run(self):          # executed by a Celery worker
+        ...</code></pre>
+<pre><code>python manage.py migrate        # also syncs the jobs for gobeat
+docker run -e DATABASE_URL=postgres://user:pass@db/app \
+    ghcr.io/bapp-open/django-celery-beat-go</code></pre>
+
+  <h2>What it does</h2>
+  <div class="grid">
+    <div class="card"><strong>Jobs in <code>cron.py</code></strong>
+      <span>Declare periodic jobs as classes in each app; no django-celery-beat required.</span></div>
+    <div class="card"><strong>django-celery-beat compatible</strong>
+      <span>Optional: existing <code>PeriodicTask</code> rows and the admin keep working, with identical behaviour.</span></div>
+    <div class="card"><strong>Claim before publish</strong>
+      <span>Each run is claimed in Postgres first and journaled until the broker confirms it.</span></div>
+    <div class="card"><strong>One active replica</strong>
+      <span>A second instance stands by on a Postgres advisory lock and takes over on failure.</span></div>
+    <div class="card"><strong>Redis and RabbitMQ</strong>
+      <span>Messages are byte-identical to what Celery itself publishes.</span></div>
+    <div class="card"><strong>Shadow mode</strong>
+      <span>Run it beside Python beat in dry-run and diff the two dispatch logs before switching.</span></div>
+  </div>
+
+  <h2>What it does not do</h2>
+  <ul class="no">
+    <li>Databases other than <strong>PostgreSQL</strong>; brokers other than <strong>Redis</strong> and <strong>RabbitMQ</strong>.</li>
+    <li>Celery versions other than the <strong>latest stable (5.7.x)</strong> — it refuses to start rather than guess.</li>
+    <li>Non-JSON task serializers (pickle, yaml, msgpack) and solar schedules.</li>
+    <li>Anything that needs your Python code at publish time: publish signal handlers
+      (Sentry/OpenTelemetry header injection), <code>task-sent</code> events, argument-dependent routers.</li>
+    <li>Running tasks or storing results — it only schedules and sends them.</li>
+  </ul>
+  <p>Unsupported input is reported with an error naming the task and skipped; it is never approximated.
+    The full list is in the
+    <a href="https://github.com/bapp-open/django-celery-beat-go#known-differences-from-python-beat">README</a>.</p>
+
+  <footer>MIT licensed · <a href="https://github.com/bapp-open/django-celery-beat-go/issues">Report an issue</a></footer>
+</main>
+</body>
+</html>
