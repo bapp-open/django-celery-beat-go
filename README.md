@@ -1,8 +1,15 @@
 # gobeat
 
-A Go service that replaces the `celery beat` process for Django projects
-using django-celery-beat's `DatabaseScheduler`. Workers, tasks and the
-Django admin stay exactly as they are; only the beat process changes.
+A Go service that replaces the `celery beat` process for Django projects.
+Workers and tasks stay exactly as they are; only the beat process changes.
+Periodic jobs come from two places:
+
+* **`cron.py` in your apps** — classes extending `CronInterface`, picked
+  up automatically the way Django picks up `models.py` (stored in
+  gobeat's own table; needs nothing but Celery), and
+* **django-celery-beat's tables** — optional: when that app is installed
+  its `PeriodicTask` rows and admin keep working unchanged, with
+  behaviour identical to `DatabaseScheduler`.
 
 * **Small**: one static binary on an empty image (16 MB), ~12 MB RSS in
   the integration environment (target: under 20 MB).
@@ -34,9 +41,47 @@ gobeat never imports your code. Everything that needs the Celery app
 (`task_routes`, decorator options, queue declarations, `beat_schedule`)
 is resolved by Celery itself inside `gobeat_sync`.
 
+## Periodic jobs in `cron.py`
+
+```python
+# myapp/cron.py  - discovered automatically for every app in INSTALLED_APPS
+from datetime import timedelta
+from django_gobeat import CronInterface, crontab
+
+class NightlyCleanup(CronInterface):
+    schedule = crontab(minute=0, hour=4)      # celery.schedules.crontab, a timedelta, or seconds
+    timezone = "Europe/Bucharest"             # crontab zone; default: CELERY_TIMEZONE
+    queue = "maintenance"                     # also: exchange, routing_key, priority, expires, headers
+
+    def run(self):                            # executed by a Celery worker
+        ...
+
+class Heartbeat(CronInterface):
+    schedule = timedelta(seconds=30)
+    task = "myapp.tasks.ping"                 # schedule an existing task instead of run()
+    kwargs = {"source": "cron"}
+```
+
+* A class with `run()` is registered as a Celery task named after the job
+  (`myapp.cron.NightlyCleanup`, or `name = "..."`); workers find it
+  because discovery happens in `AppConfig.ready()`.
+* Project conventions go into your own base class: mark it
+  `abstract = True` and override `get_schedule()`, `get_args()`,
+  `get_kwargs()`, `get_headers()`, `is_enabled()` or `run()`.
+* `manage.py gobeat_sync` writes the discovered jobs to
+  `django_gobeat_job` (creating, updating and removing rows to match the
+  code; run counts and the admin's *paused* switch are kept). Jobs can
+  also be created by hand in the admin (`source = admin`).
+* Without django-celery-beat, entries of `app.conf.beat_schedule` are
+  written to the same table.
+* Semantics are Celery's: crontabs are evaluated exactly like
+  `celery.schedules.crontab` in the job's zone; an interval job first
+  runs one interval after it was defined and then every interval.
+
 ## Migration steps
 
-1. Install the companion app in the Django project:
+1. Install the companion app in the Django project (`django-celery-beat`
+   may stay installed or not — gobeat uses its tables only when it is):
 
    ```python
    INSTALLED_APPS += ["django_gobeat"]
@@ -50,9 +95,9 @@ is resolved by Celery itself inside `gobeat_sync`.
    python manage.py gobeat_sync        # prints warnings for anything it cannot resolve exactly
    ```
 
-   `gobeat_sync` also writes code-defined `beat_schedule` entries into
-   `PeriodicTask`, as Python beat does on start-up
-   (`DatabaseScheduler.setup_schedule`).
+   `gobeat_sync` writes the `cron.py` jobs, and code-defined
+   `beat_schedule` entries into `PeriodicTask` as Python beat does on
+   start-up (`DatabaseScheduler.setup_schedule`).
 
 3. **Shadow first.** Keep Python beat running and start gobeat beside it
    in dry-run mode; it logs what it would dispatch and writes nothing:
@@ -79,8 +124,10 @@ is resolved by Celery itself inside `gobeat_sync`.
 
 Stop gobeat, start `celery beat` again. gobeat keeps `last_run_at` and
 `total_run_count` in the django-celery-beat tables up to date, so Python
-beat continues from where gobeat stopped. The two `django_gobeat_*` tables
-can stay or be dropped with `manage.py migrate django_gobeat zero`.
+beat continues from where gobeat stopped. Jobs that exist only in
+`cron.py` / `django_gobeat_job` are not known to Python beat: list them in
+`beat_schedule` if you need them during a rollback. The `django_gobeat_*`
+tables can stay or be dropped with `manage.py migrate django_gobeat zero`.
 
 ## Configuration
 
@@ -241,7 +288,8 @@ as a failing golden case.
 | fuzz | `make fuzz` | crontab parser, crontab evaluation, JSON loader, message encoder |
 | soak | `make test`, `make soak-golden` | real `DatabaseScheduler.tick()` on a fake clock vs gobeat's simulation: identical dispatch counts per task; 10,000 tasks × 30 days with a flat heap |
 | version matrix | `make matrix` | goldens regenerated under each supported version must be byte-identical |
-| integration | `make integration` | docker compose: Postgres, Redis, RabbitMQ, a Django project, real workers — on both brokers |
+| Django app | `make pytest` | `cron.py` discovery, `CronInterface`, job sync |
+| integration | `make integration` | docker compose: Postgres, Redis, RabbitMQ, a Django project, real workers — on both brokers, plus a pass with django-celery-beat not installed |
 | failure injection | `make integration` | database down/up, broker down/up, SIGKILL between claim and publish and between publish and journal mark, network partition, two instances with failover, missed-run policies; clock jumps on a fake clock in `internal/scheduler` |
 | shadow | `make integration` | Python beat and gobeat dry-run side by side, logs compared with `gobeat shadow-diff` |
 

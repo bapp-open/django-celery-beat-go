@@ -33,6 +33,23 @@ Django project                          gobeat container
   settings row, on an unknown django-celery-beat schema, or on an
   unsupported Celery/django-celery-beat version.
 
+## Schedule sources
+
+gobeat schedules rows from two tables through the same loop:
+
+* `django_gobeat_job` - gobeat's own table. `gobeat_sync` fills it from
+  the `CronInterface` classes found in every app's `cron.py`
+  (`django_gobeat/cron.py`: `autodiscover_modules('cron')` in
+  `AppConfig.ready`, a registry filled by `__init_subclass__`); rows can
+  also be created in the admin. Crontab jobs are evaluated with the same
+  code as `TzAwareCrontab`, in the job's zone or `CELERY_TIMEZONE`.
+* `django_celery_beat_*` - only when django-celery-beat is installed in
+  the project (the settings row then records its version). Behaviour is
+  `DatabaseScheduler`'s.
+
+A task is identified by `(source, primary key)`; the journal records the
+source, and task ids are derived from that pair plus the scheduled time.
+
 ## Scheduling model
 
 Python beat keeps a heap of `(next_check, entry)`; the top entry is
