@@ -39,12 +39,36 @@ class Command(BaseCommand):
         app.loader.import_default_modules()
         app.finalize(auto=True)
 
-        if not opts['no_beat_schedule'] and not opts['dry_run']:
-            self._sync_beat_schedule(app)
+        from django.apps import apps
+        from django.db import connection
 
-        from django_celery_beat.models import PeriodicTask
-        referenced = list(
-            PeriodicTask.objects.values_list('task', flat=True).distinct())
+        from django_gobeat import cron, triggers
+        from django_gobeat.models import Job
+
+        has_dcb = apps.is_installed('django_celery_beat')
+        referenced = set()
+        if not opts['dry_run']:
+            extra = {}
+            if not opts['no_beat_schedule']:
+                if has_dcb:
+                    self._sync_beat_schedule(app)
+                else:
+                    extra = self._beat_schedule_as_jobs(app)
+            created, updated, deleted, errors = cron.sync_jobs(extra)
+            for error in errors:
+                self.stderr.write(self.style.ERROR('gobeat_sync: ' + error))
+            if errors and opts['strict']:
+                raise CommandError('invalid cron job definitions')
+            self.stdout.write(
+                'cron jobs: %d discovered, %d created, %d updated, %d removed'
+                % (len(cron.registry), created, updated, deleted))
+            triggers.install(connection)
+        referenced.update(Job.objects.values_list('task', flat=True))
+        if has_dcb:
+            from django_celery_beat.models import PeriodicTask
+            referenced.update(
+                PeriodicTask.objects.values_list('task', flat=True))
+        referenced = sorted(referenced)
         data = build_settings(app, extra_task_names=referenced,
                               include_broker_url=not opts['no_broker_url'])
         version = version_hash(data)
@@ -83,6 +107,38 @@ class Command(BaseCommand):
                 'No Celery app found. Import your app in the project '
                 '__init__ or set GOBEAT_CELERY_APP = "proj.celery:app".')
         return app
+
+    def _beat_schedule_as_jobs(self, app):
+        """Without django-celery-beat, ``app.conf.beat_schedule`` entries
+        become gobeat jobs."""
+        from django_gobeat import cron
+
+        out = {}
+        for name, entry in (app.conf.beat_schedule or {}).items():
+            options = dict(entry.get('options') or {})
+            try:
+                fields = cron.schedule_fields(entry['schedule'], name)
+                fields.update(
+                    task=entry['task'],
+                    args=json.dumps(list(entry.get('args') or ())),
+                    kwargs=json.dumps(dict(entry.get('kwargs') or {})),
+                    headers=json.dumps(dict(options.get('headers') or {})),
+                    queue=options.get('queue'),
+                    exchange=options.get('exchange'),
+                    routing_key=options.get('routing_key'),
+                    priority=options.get('priority'),
+                    expire_seconds=cron._seconds(
+                        options.get('expire_seconds', options.get('expires')),
+                        name),
+                    enabled=True, one_off=False)
+            except (cron.CronError, TypeError, ValueError, KeyError) as exc:
+                self.stderr.write(self.style.ERROR(
+                    'gobeat_sync: beat_schedule entry %r skipped: %s' % (name, exc)))
+                continue
+            out[name] = fields
+        self.stdout.write('beat_schedule: %d code-defined entries synced '
+                          'to gobeat jobs' % len(out))
+        return out
 
     def _sync_beat_schedule(self, app):
         """Exactly what Python beat does on start-up:

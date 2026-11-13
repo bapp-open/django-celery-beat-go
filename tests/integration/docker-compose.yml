@@ -18,6 +18,7 @@ x-django: &django
   environment: &django-env
     BROKER_URL: ${BROKER_URL:-redis://redis:6379/0}
     USE_TZ: ${USE_TZ:-1}
+    WITH_DCB: ${WITH_DCB:-1}
     TIME_ZONE: ${TIME_ZONE:-Europe/Bucharest}
     PGHOST: postgres
   depends_on:

@@ -5,10 +5,12 @@ from kombu import Exchange, Queue
 SECRET_KEY = 'integration-tests-only'
 DEBUG = False
 ALLOWED_HOSTS = ['*']
+# django-celery-beat is optional for gobeat (WITH_DCB=0 runs without it)
+WITH_DCB = os.environ.get('WITH_DCB', '1') == '1'
 INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django.contrib.auth',
-    'django_celery_beat',
+    *(['django_celery_beat'] if WITH_DCB else []),
     'django_gobeat',
     'runlog',
 ]
@@ -27,7 +29,8 @@ DJANGO_CELERY_BEAT_TZ_AWARE = USE_TZ
 
 CELERY_BROKER_URL = os.environ['BROKER_URL']
 CELERY_TIMEZONE = TIME_ZONE
-CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+if WITH_DCB:
+    CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 CELERY_RESULT_BACKEND = None
 CELERY_TASK_IGNORE_RESULT = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True

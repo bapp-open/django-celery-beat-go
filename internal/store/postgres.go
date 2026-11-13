@@ -36,8 +36,8 @@ var knownMigrations = map[string]bool{
 // requiredMigration is the newest migration every supported release has.
 const requiredMigration = "0019_alter_periodictasks_options"
 
-// requiredColumns lists the columns gobeat reads or writes.
-var requiredColumns = map[string][]string{
+// dcbColumns lists the django-celery-beat columns gobeat reads or writes.
+var dcbColumns = map[string][]string{
 	"django_celery_beat_periodictask": {"id", "name", "task", "args", "kwargs", "headers", "queue", "exchange",
 		"routing_key", "priority", "expires", "expire_seconds", "one_off", "start_time", "enabled", "last_run_at",
 		"total_run_count", "date_changed", "interval_id", "crontab_id", "clocked_id", "solar_id"},
@@ -45,8 +45,16 @@ var requiredColumns = map[string][]string{
 	"django_celery_beat_crontabschedule":  {"id", "minute", "hour", "day_of_week", "day_of_month", "month_of_year", "timezone"},
 	"django_celery_beat_clockedschedule":  {"id", "clocked_time"},
 	"django_celery_beat_periodictasks":    {"ident", "last_update"},
-	"django_gobeat_settings":              {"key", "version", "data"},
-	"django_gobeat_dispatch": {"id", "periodic_task_id", "name", "task", "task_id", "scheduled_for", "claimed_at",
+}
+
+// gobeatColumns lists the django_gobeat columns.
+var gobeatColumns = map[string][]string{
+	"django_gobeat_settings": {"key", "version", "data"},
+	"django_gobeat_job": {"id", "name", "task", "kind", "minute", "hour", "day_of_week", "day_of_month",
+		"month_of_year", "timezone", "every_microseconds", "args", "kwargs", "headers", "queue", "exchange",
+		"routing_key", "priority", "expire_seconds", "enabled", "paused", "one_off", "start_time", "expires",
+		"last_run_at", "total_run_count", "date_changed"},
+	"django_gobeat_dispatch": {"id", "source", "periodic_task_id", "name", "task", "task_id", "scheduled_for", "claimed_at",
 		"published_at", "abandoned_at", "attempts", "last_error", "message"},
 }
 
@@ -98,6 +106,7 @@ type pg struct {
 	lockKey int64
 	key     string
 	ts      string // "timestamptz" or "timestamp" (USE_TZ=False)
+	dcb     bool   // django-celery-beat tables are in use
 }
 
 func (s *pg) Close() {
@@ -137,39 +146,49 @@ type SchemaError struct{ Msg string }
 
 func (e *SchemaError) Error() string { return "unknown database schema: " + e.Msg }
 
-func (s *pg) CheckSchema(ctx context.Context, useTZ bool) error {
-	rows, err := s.conn.Query(ctx, "SELECT name FROM django_migrations WHERE app = 'django_celery_beat'")
-	if err != nil {
-		if isUndefinedTable(err) {
-			return &SchemaError{"django_migrations table not found; is DATABASE_URL pointing at the Django database?"}
+func (s *pg) CheckSchema(ctx context.Context, useTZ, useDCB bool) error {
+	s.dcb = useDCB
+	required := map[string][]string{}
+	for t, c := range gobeatColumns {
+		required[t] = c
+	}
+	if useDCB {
+		for t, c := range dcbColumns {
+			required[t] = c
 		}
-		return err
-	}
-	applied, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return err
-	}
-	if len(applied) == 0 {
-		return &SchemaError{"django_celery_beat has no applied migrations; run `manage.py migrate`"}
-	}
-	hasRequired := false
-	var unknown []string
-	for _, name := range applied {
-		if !knownMigrations[name] {
-			unknown = append(unknown, name)
+		rows, err := s.conn.Query(ctx, "SELECT name FROM django_migrations WHERE app = 'django_celery_beat'")
+		if err != nil {
+			if isUndefinedTable(err) {
+				return &SchemaError{"django_migrations table not found; is DATABASE_URL pointing at the Django database?"}
+			}
+			return err
 		}
-		hasRequired = hasRequired || name == requiredMigration
-	}
-	if len(unknown) > 0 {
-		sort.Strings(unknown)
-		return &SchemaError{fmt.Sprintf("django_celery_beat migration(s) %s are not known to this gobeat build; upgrade gobeat before upgrading django-celery-beat", strings.Join(unknown, ", "))}
-	}
-	if !hasRequired {
-		return &SchemaError{fmt.Sprintf("django_celery_beat migration %s is not applied; supported django-celery-beat versions are 2.8 and 2.9", requiredMigration)}
+		applied, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		if len(applied) == 0 {
+			return &SchemaError{"django_celery_beat has no applied migrations; run `manage.py migrate`"}
+		}
+		hasRequired := false
+		var unknown []string
+		for _, name := range applied {
+			if !knownMigrations[name] {
+				unknown = append(unknown, name)
+			}
+			hasRequired = hasRequired || name == requiredMigration
+		}
+		if len(unknown) > 0 {
+			sort.Strings(unknown)
+			return &SchemaError{fmt.Sprintf("django_celery_beat migration(s) %s are not known to this gobeat build; upgrade gobeat before upgrading django-celery-beat", strings.Join(unknown, ", "))}
+		}
+		if !hasRequired {
+			return &SchemaError{fmt.Sprintf("django_celery_beat migration %s is not applied; supported django-celery-beat versions are 2.8 and 2.9", requiredMigration)}
+		}
 	}
 
-	rows, err = s.conn.Query(ctx, `SELECT table_name, column_name, data_type FROM information_schema.columns
-		WHERE table_schema = ANY (current_schemas(false)) AND table_name = ANY ($1)`, tableNames())
+	rows, err := s.conn.Query(ctx, `SELECT table_name, column_name, data_type FROM information_schema.columns
+		WHERE table_schema = ANY (current_schemas(false)) AND table_name = ANY ($1)`, tableNames(required))
 	if err != nil {
 		return err
 	}
@@ -183,7 +202,7 @@ func (s *pg) CheckSchema(ctx context.Context, useTZ bool) error {
 		have[c.Table+"."+c.Column] = c.Type
 	}
 	var missing []string
-	for table, names := range requiredColumns {
+	for table, names := range required {
 		for _, n := range names {
 			if _, ok := have[table+"."+n]; !ok {
 				missing = append(missing, table+"."+n)
@@ -206,10 +225,14 @@ func (s *pg) CheckSchema(ctx context.Context, useTZ bool) error {
 		wantType = "timestamp without time zone"
 		s.ts = "timestamp"
 	}
-	for _, c := range []string{"django_celery_beat_periodictask.last_run_at", "django_celery_beat_periodictask.start_time",
-		"django_celery_beat_periodictask.expires", "django_celery_beat_periodictask.date_changed",
-		"django_celery_beat_clockedschedule.clocked_time", "django_celery_beat_periodictasks.last_update",
-		"django_gobeat_dispatch.scheduled_for", "django_gobeat_dispatch.claimed_at"} {
+	check := []string{"django_gobeat_job.last_run_at", "django_gobeat_job.date_changed",
+		"django_gobeat_dispatch.scheduled_for", "django_gobeat_dispatch.claimed_at"}
+	if useDCB {
+		check = append(check, "django_celery_beat_periodictask.last_run_at", "django_celery_beat_periodictask.start_time",
+			"django_celery_beat_periodictask.expires", "django_celery_beat_periodictask.date_changed",
+			"django_celery_beat_clockedschedule.clocked_time", "django_celery_beat_periodictasks.last_update")
+	}
+	for _, c := range check {
 		if have[c] != wantType {
 			return &SchemaError{fmt.Sprintf("column %s is %q but the settings row says USE_TZ=%v (expected %q); re-run gobeat_sync", c, have[c], useTZ, wantType)}
 		}
@@ -217,9 +240,9 @@ func (s *pg) CheckSchema(ctx context.Context, useTZ bool) error {
 	return nil
 }
 
-func tableNames() []string {
-	out := make([]string, 0, len(requiredColumns))
-	for t := range requiredColumns {
+func tableNames(required map[string][]string) []string {
+	out := make([]string, 0, len(required))
+	for t := range required {
 		out = append(out, t)
 	}
 	sort.Strings(out)
@@ -231,9 +254,14 @@ func (s *pg) State(ctx context.Context) (State, error) {
 		st      State
 		version *string
 	)
-	err := s.conn.QueryRow(ctx, `SELECT
-		(SELECT last_update FROM django_celery_beat_periodictasks WHERE ident = 1),
-		(SELECT version FROM django_gobeat_settings WHERE key = $1)`, s.key).Scan(&st.Marker, &version)
+	marker := "NULL::" + s.ts
+	if s.dcb {
+		marker = "(SELECT last_update FROM django_celery_beat_periodictasks WHERE ident = 1)"
+	}
+	err := s.conn.QueryRow(ctx, `SELECT `+marker+`,
+		(SELECT version FROM django_gobeat_settings WHERE key = $1),
+		(SELECT coalesce(max(date_changed)::text, '') || '/' || count(*) FROM django_gobeat_job)`,
+		s.key).Scan(&st.Marker, &version, &st.JobsMarker)
 	if err != nil {
 		return st, err
 	}
@@ -268,13 +296,64 @@ func utcp(t *time.Time) *time.Time {
 	return &u
 }
 
-func (s *pg) Tasks(ctx context.Context) ([]Task, error) {
-	rows, err := s.conn.Query(ctx, tasksSQL)
+const jobsSQL = `SELECT id, name, task, kind, minute, hour, day_of_week, day_of_month, month_of_year, timezone,
+	every_microseconds, COALESCE(args, ''), COALESCE(kwargs, ''), headers, queue, exchange, routing_key, priority,
+	expires, expire_seconds, one_off, start_time, last_run_at, total_run_count, date_changed
+FROM django_gobeat_job
+WHERE enabled AND NOT paused
+ORDER BY id`
+
+// jobs loads django_gobeat's own periodic jobs.
+func (s *pg) jobs(ctx context.Context) ([]Task, error) {
+	rows, err := s.conn.Query(ctx, jobsSQL)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Task
+	for rows.Next() {
+		var (
+			t                               Task
+			kind                            string
+			minute, hour, dow, dom, moy, tz string
+			every                           *int64
+			priority, expireSeconds         *int64
+		)
+		if err := rows.Scan(&t.ID, &t.Name, &t.Task, &kind, &minute, &hour, &dow, &dom, &moy, &tz,
+			&every, &t.Args, &t.Kwargs, &t.Headers, &t.Queue, &t.Exchange, &t.RoutingKey, &priority,
+			&t.Expires, &expireSeconds, &t.OneOff, &t.StartTime, &t.LastRunAt, &t.TotalRunCount, &t.DateChanged); err != nil {
+			return nil, err
+		}
+		t.Source, t.Enabled = SourceJob, true
+		t.Priority, t.ExpireSeconds = priority, expireSeconds
+		switch kind {
+		case "interval":
+			period := "microseconds"
+			if every == nil {
+				every = new(int64) // refused later: not positive
+			}
+			t.IntervalEvery, t.IntervalPeriod = every, &period
+		case "crontab":
+			t.Cron = &CronRow{minute, hour, dow, dom, moy, tz}
+		}
+		t.Expires, t.StartTime, t.LastRunAt = utcp(t.Expires), utcp(t.StartTime), utcp(t.LastRunAt)
+		t.DateChanged = t.DateChanged.UTC()
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *pg) Tasks(ctx context.Context) ([]Task, error) {
+	jobs, err := s.jobs(ctx)
+	if err != nil || !s.dcb {
+		return jobs, err
+	}
+	rows, err := s.conn.Query(ctx, tasksSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := jobs
 	for rows.Next() {
 		var (
 			t                                       Task
@@ -302,26 +381,41 @@ func (s *pg) Tasks(ctx context.Context) ([]Task, error) {
 		}
 		t.Expires, t.StartTime, t.LastRunAt, t.ClockedTime = utcp(t.Expires), utcp(t.StartTime), utcp(t.LastRunAt), utcp(t.ClockedTime)
 		t.DateChanged = t.DateChanged.UTC()
+		t.Source = SourceDCB
 		out = append(out, t)
 	}
 	return out, rows.Err()
 }
 
+// table returns the table and the extra SET clause of a claim for a source.
+func (s *pg) table(source string) (table, guard, touch string) {
+	if source == SourceJob {
+		// date_changed marks definition changes of a Job; a run is not one
+		return "django_gobeat_job", "enabled AND NOT paused", ""
+	}
+	return "django_celery_beat_periodictask", "enabled", fmt.Sprintf(", date_changed = $1::%s", s.ts)
+}
+
 func (s *pg) Claim(ctx context.Context, c Claim) (bool, int64, error) {
 	// One statement: the compare-and-swap and the journal insert commit
 	// or fail together.
+	table, guard, touch := s.table(c.Source)
 	q := fmt.Sprintf(`WITH claimed AS (
-		UPDATE django_celery_beat_periodictask
-		SET last_run_at = $1::%[1]s, total_run_count = total_run_count + 1, date_changed = $1::%[1]s
-		WHERE id = $2 AND enabled AND last_run_at IS NOT DISTINCT FROM $3::%[1]s
+		UPDATE %[2]s
+		SET last_run_at = $1::%[1]s, total_run_count = total_run_count + 1%[4]s
+		WHERE id = $2 AND %[3]s AND last_run_at IS NOT DISTINCT FROM $3::%[1]s
 		RETURNING id)
 	INSERT INTO django_gobeat_dispatch
-		(periodic_task_id, name, task, task_id, scheduled_for, claimed_at, attempts, last_error, message)
-	SELECT id, $4, $5, $6, $7::%[1]s, $1::%[1]s, 0, '', $8::jsonb FROM claimed
-	RETURNING id`, s.ts)
+		(source, periodic_task_id, name, task, task_id, scheduled_for, claimed_at, attempts, last_error, message)
+	SELECT $9, id, $4, $5, $6, $7::%[1]s, $1::%[1]s, 0, '', $8::jsonb FROM claimed
+	RETURNING id`, s.ts, table, guard, touch)
+	source := c.Source
+	if source == "" {
+		source = SourceDCB
+	}
 	var id int64
 	err := s.conn.QueryRow(ctx, q, c.Now, c.PeriodicTaskID, c.SeenLastRunAt, c.Name, c.Task, c.TaskID,
-		c.ScheduledFor, string(c.Message)).Scan(&id)
+		c.ScheduledFor, string(c.Message), source).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, 0, nil
 	}
@@ -335,9 +429,10 @@ func (s *pg) Claim(ctx context.Context, c Claim) (bool, int64, error) {
 	return true, id, nil
 }
 
-func (s *pg) Skip(ctx context.Context, id int64, seen *time.Time, now time.Time) (bool, error) {
-	q := fmt.Sprintf(`UPDATE django_celery_beat_periodictask SET last_run_at = $1::%[1]s, date_changed = $1::%[1]s
-		WHERE id = $2 AND enabled AND last_run_at IS NOT DISTINCT FROM $3::%[1]s`, s.ts)
+func (s *pg) Skip(ctx context.Context, source string, id int64, seen *time.Time, now time.Time) (bool, error) {
+	table, guard, touch := s.table(source)
+	q := fmt.Sprintf(`UPDATE %[2]s SET last_run_at = $1::%[1]s%[4]s
+		WHERE id = $2 AND %[3]s AND last_run_at IS NOT DISTINCT FROM $3::%[1]s`, s.ts, table, guard, touch)
 	tag, err := s.conn.Exec(ctx, q, now, id, seen)
 	if err != nil {
 		return false, err
@@ -386,7 +481,12 @@ func (s *pg) Pending(ctx context.Context) ([]Pending, error) {
 	return out, rows.Err()
 }
 
-func (s *pg) DisableExpired(ctx context.Context, id int64, now time.Time) error {
+func (s *pg) DisableExpired(ctx context.Context, source string, id int64, now time.Time) error {
+	if source == SourceJob {
+		_, err := s.conn.Exec(ctx, fmt.Sprintf(`UPDATE django_gobeat_job
+			SET enabled = false, last_run_at = NULL, date_changed = $1::%s WHERE id = $2 AND enabled`, s.ts), now, id)
+		return err
+	}
 	// ModelEntry._disable: enabled=False; PeriodicTask.save() nulls
 	// last_run_at for a disabled task; no_changes=True leaves the change
 	// marker alone.
@@ -395,7 +495,13 @@ func (s *pg) DisableExpired(ctx context.Context, id int64, now time.Time) error 
 	return err
 }
 
-func (s *pg) DisableOneOff(ctx context.Context, id int64, now time.Time) error {
+func (s *pg) DisableOneOff(ctx context.Context, source string, id int64, now time.Time) error {
+	if source == SourceJob {
+		_, err := s.conn.Exec(ctx, fmt.Sprintf(`UPDATE django_gobeat_job
+			SET enabled = false, total_run_count = 0, last_run_at = NULL, date_changed = $1::%s
+			WHERE id = $2 AND enabled`, s.ts), now, id)
+		return err
+	}
 	// ModelEntry.is_due "ONE OFF TASK": enabled=False, total_run_count=0,
 	// no_changes=False -> PeriodicTasks.update_changed().
 	batch := &pgx.Batch{}

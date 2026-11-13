@@ -13,6 +13,10 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: make pytest
       - run: make fuzz FUZZTIME=30s
       - run: make build
 
@@ -64,7 +68,15 @@ jobs:
       - run: make build images
       - run: pip install pytest
       - working-directory: tests/integration
-        run: python -m pytest -x -q test_integration.py test_failures.py test_shadow.py
+        run: python -m pytest -x -q test_integration.py test_cron.py test_failures.py test_shadow.py
+      - name: without django-celery-beat installed
+        if: matrix.broker == 'redis' && matrix.dcb == '2.9.0'
+        env:
+          DCB_VERSION: none
+          WITH_DCB: "0"
+        run: |
+          tests/integration/build.sh
+          cd tests/integration && python -m pytest -x -q test_nodcb.py test_cron.py
       - if: always()
         uses: actions/upload-artifact@v4
         with:

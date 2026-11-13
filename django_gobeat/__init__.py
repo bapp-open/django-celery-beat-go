@@ -9,3 +9,12 @@ __version__ = '0.1.0'
 SETTINGS_SCHEMA = 1
 #: Postgres NOTIFY channel gobeat LISTENs on.
 NOTIFY_CHANNEL = 'gobeat'
+
+
+def __getattr__(name):
+    # Lazy so that importing django_gobeat never imports Celery before the
+    # project is ready for it.
+    if name in ('CronInterface', 'CronError', 'crontab'):
+        from . import cron
+        return getattr(cron, name)
+    raise AttributeError(name)

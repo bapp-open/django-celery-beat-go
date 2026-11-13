@@ -8,10 +8,12 @@ GOLDEN_REDIS_URL ?= redis://127.0.0.1:6379/5
 GOLDEN_AMQP_URL  ?= amqp://guest:guest@127.0.0.1:5672//
 export GOLDEN_REDIS_URL GOLDEN_AMQP_URL
 
-.PHONY: ci build test fuzz venv golden soak-golden soak-check matrix images integration docker
+TESTS := test_integration.py test_cron.py test_failures.py test_shadow.py
+
+.PHONY: ci build test pytest fuzz venv golden soak-golden soak-check matrix images integration docker
 
 ## ci: the whole suite - unit, differential, fuzz, soak, race, leaks, matrix, integration, failure injection, shadow
-ci: test fuzz matrix soak-check integration
+ci: test pytest fuzz matrix soak-check integration
 
 build:
 	CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o bin/gobeat ./cmd/gobeat
@@ -22,6 +24,10 @@ test:
 	go vet ./...
 	go test -race -count=1 -timeout 30m ./...
 	go test -count=1 -timeout 30m -run 'TestSoak10kTasks30Days' ./internal/scheduler
+
+## pytest: the Django app's own tests (cron.py discovery, CronInterface, sync)
+pytest: venv
+	cd tests/python && ../../$(PY) -m pytest -q -p no:cacheprovider
 
 ## fuzz: run every fuzz target for FUZZTIME
 fuzz:
@@ -51,7 +57,7 @@ soak-check: venv
 	$(PY) tests/differential/gen_soak.py --out tests/integration/.artifacts/soak --tasks 100 --days 3
 	cmp testdata/soak/soak_100_3d.json.gz tests/integration/.artifacts/soak/soak_100_3d.json.gz
 
-## matrix: regenerate all goldens under every supported Celery/django-celery-beat version; must be byte-identical
+## matrix: regenerate all goldens with the supported django-celery-beat releases; must be byte-identical
 matrix:
 	PYTHON=$(PYTHON) tests/differential/matrix.sh
 
@@ -60,8 +66,11 @@ images:
 
 ## integration: docker compose (Postgres, Redis, RabbitMQ, Django, workers): scenarios, failure injection, shadow diff - on both brokers
 integration: build images venv
-	cd tests/integration && BROKER=redis ../../$(PY) -m pytest -x -q test_integration.py test_failures.py test_shadow.py
-	cd tests/integration && BROKER=amqp  ../../$(PY) -m pytest -x -q test_integration.py test_failures.py test_shadow.py
+	cd tests/integration && BROKER=redis ../../$(PY) -m pytest -x -q $(TESTS)
+	cd tests/integration && BROKER=amqp  ../../$(PY) -m pytest -x -q $(TESTS)
+	# the same stack with django-celery-beat not installed at all
+	DCB_VERSION=none tests/integration/build.sh
+	cd tests/integration && WITH_DCB=0 DCB_VERSION=none BROKER=redis ../../$(PY) -m pytest -x -q test_nodcb.py test_cron.py
 
 docker:
 	docker build --build-arg VERSION=$(VERSION) -t gobeat:$(VERSION) .

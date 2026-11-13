@@ -10,8 +10,9 @@ ENV PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=igno
 RUN --mount=type=secret,id=ca,target=/tmp/ca.crt,required=false \
     if [ -s /tmp/ca.crt ]; then export PIP_CERT=/tmp/ca.crt; fi; \
     pip install --no-cache-dir "celery[redis]==${CELERY_VERSION}" \
-        "django-celery-beat==${DCB_VERSION}" "Django==${DJANGO_VERSION}" \
-        "psycopg[binary]>=3.1"
+        "Django==${DJANGO_VERSION}" "psycopg[binary]>=3.1" && \
+    if [ "${DCB_VERSION}" != "none" ]; then \
+        pip install --no-cache-dir "django-celery-beat==${DCB_VERSION}"; fi
 WORKDIR /srv
 COPY django_gobeat /srv/django_gobeat
 COPY tests/integration/project /srv

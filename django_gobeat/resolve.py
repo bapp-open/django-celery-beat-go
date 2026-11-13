@@ -189,11 +189,18 @@ def _named_queue(options, name, known_queues):
     return out
 
 
+def _dcb_version():
+    from django.apps import apps
+    if not apps.is_installed('django_celery_beat'):
+        return None
+    import django_celery_beat
+    return django_celery_beat.__version__
+
+
 def build_settings(app, extra_task_names=(), include_broker_url=True):
     """Return the settings document for ``app``."""
     import celery
     import django
-    import django_celery_beat
     import kombu
     from celery.app.routes import MapRoute
     from django.conf import settings as dj_settings
@@ -284,7 +291,8 @@ def build_settings(app, extra_task_names=(), include_broker_url=True):
         'versions': {
             'celery': celery.__version__,
             'kombu': kombu.__version__,
-            'django_celery_beat': django_celery_beat.__version__,
+            # django-celery-beat is optional
+            'django_celery_beat': _dcb_version(),
             'django': django.get_version(),
             'python': platform.python_version(),
         },

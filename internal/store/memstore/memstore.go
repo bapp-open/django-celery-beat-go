@@ -106,7 +106,7 @@ func (db *DB) touch() {
 func (db *DB) Put(t store.Task) {
 	db.mu.Lock()
 	cp := t
-	db.tasks[t.ID] = &cp
+	db.tasks[cp.Key()] = &cp
 	db.bump()
 	db.mu.Unlock()
 	db.touch()
@@ -117,7 +117,7 @@ func (db *DB) PutQuiet(ts []store.Task) {
 	db.mu.Lock()
 	for i := range ts {
 		cp := ts[i]
-		db.tasks[cp.ID] = &cp
+		db.tasks[cp.Key()] = &cp
 	}
 	db.mu.Unlock()
 }
@@ -130,7 +130,7 @@ func (db *DB) bump() {
 	db.marker = &now
 }
 
-// Delete removes a row, like PeriodicTask.delete().
+// Delete removes a row (by Task.Key), like PeriodicTask.delete().
 func (db *DB) Delete(id int64) {
 	db.mu.Lock()
 	delete(db.tasks, id)
@@ -231,7 +231,7 @@ func (s *session) Settings(context.Context) ([]byte, string, error) {
 	return s.db.settings, s.db.version, nil
 }
 
-func (s *session) CheckSchema(context.Context, bool) error {
+func (s *session) CheckSchema(context.Context, bool, bool) error {
 	defer s.db.mu.Unlock()
 	return s.begin("schema")
 }
@@ -263,8 +263,13 @@ func (s *session) Tasks(context.Context) ([]store.Task, error) {
 			out = append(out, *t)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sort.Slice(out, func(i, j int) bool { return out[i].Key() < out[j].Key() })
 	return out, nil
+}
+
+func key(source string, id int64) int64 {
+	t := store.Task{Source: source, ID: id}
+	return t.Key()
 }
 
 func sameTime(a, b *time.Time) bool {
@@ -279,7 +284,7 @@ func (s *session) Claim(_ context.Context, c store.Claim) (bool, int64, error) {
 	if err := s.begin("claim"); err != nil {
 		return false, 0, err
 	}
-	t, ok := s.db.tasks[c.PeriodicTaskID]
+	t, ok := s.db.tasks[key(c.Source, c.PeriodicTaskID)]
 	if !ok || !t.Enabled || !sameTime(t.LastRunAt, c.SeenLastRunAt) {
 		return false, 0, nil
 	}
@@ -299,12 +304,12 @@ func (s *session) Claim(_ context.Context, c store.Claim) (bool, int64, error) {
 	return true, s.db.nextJID, nil
 }
 
-func (s *session) Skip(_ context.Context, id int64, seen *time.Time, now time.Time) (bool, error) {
+func (s *session) Skip(_ context.Context, source string, id int64, seen *time.Time, now time.Time) (bool, error) {
 	defer s.db.mu.Unlock()
 	if err := s.begin("skip"); err != nil {
 		return false, err
 	}
-	t, ok := s.db.tasks[id]
+	t, ok := s.db.tasks[key(source, id)]
 	if !ok || !t.Enabled || !sameTime(t.LastRunAt, seen) {
 		return false, nil
 	}
@@ -366,23 +371,23 @@ func (s *session) Pending(context.Context) ([]store.Pending, error) {
 	return out, nil
 }
 
-func (s *session) DisableExpired(_ context.Context, id int64, now time.Time) error {
+func (s *session) DisableExpired(_ context.Context, source string, id int64, now time.Time) error {
 	defer s.db.mu.Unlock()
 	if err := s.begin("disable_expired"); err != nil {
 		return err
 	}
-	if t := s.db.tasks[id]; t != nil && t.Enabled {
+	if t := s.db.tasks[key(source, id)]; t != nil && t.Enabled {
 		t.Enabled, t.LastRunAt, t.DateChanged = false, nil, now
 	}
 	return nil
 }
 
-func (s *session) DisableOneOff(_ context.Context, id int64, now time.Time) error {
+func (s *session) DisableOneOff(_ context.Context, source string, id int64, now time.Time) error {
 	defer s.db.mu.Unlock()
 	if err := s.begin("disable_one_off"); err != nil {
 		return err
 	}
-	if t := s.db.tasks[id]; t != nil && t.Enabled {
+	if t := s.db.tasks[key(source, id)]; t != nil && t.Enabled {
 		t.Enabled, t.LastRunAt, t.DateChanged, t.TotalRunCount = false, nil, now, 0
 	}
 	s.db.bump()

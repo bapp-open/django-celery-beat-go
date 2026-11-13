@@ -221,6 +221,7 @@ func backoff(n int, base, max time.Duration) time.Duration {
 
 // entry is one scheduled periodic task (ModelEntry).
 type entry struct {
+	env       *schedule.Env
 	row       store.Task
 	spec      schedule.Spec
 	in        message.Input
@@ -235,7 +236,7 @@ func (h entryHeap) Less(i, j int) bool {
 	if !h[i].nextCheck.Equal(h[j].nextCheck) {
 		return h[i].nextCheck.Before(h[j].nextCheck)
 	}
-	return h[i].row.ID < h[j].row.ID
+	return h[i].row.Key() < h[j].row.Key()
 }
 func (h entryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i]; h[i].idx = i; h[j].idx = j }
 func (h *entryHeap) Push(x any)   { e := x.(*entry); e.idx = len(*h); *h = append(*h, e) }
@@ -262,7 +263,8 @@ type run struct {
 	st       store.Store
 	settings *config.Settings
 	version  string
-	env      *schedule.Env
+	env      *schedule.Env // django-celery-beat rows
+	jobEnv   *schedule.Env // django_gobeat jobs
 	builder  *message.Builder
 	maxLoop  time.Duration
 
@@ -273,6 +275,7 @@ type run struct {
 	brokerFail int
 
 	lastMarker *time.Time
+	lastJobs   string
 	lastFull   time.Time
 	lastPrune  time.Time
 	needReload bool
@@ -323,6 +326,9 @@ func versionLess(a, b [3]int) bool {
 
 func checkVersions(v map[string]string) error {
 	for _, pkg := range []string{"celery", "django_celery_beat"} {
+		if pkg == "django_celery_beat" && v[pkg] == "" {
+			continue // django-celery-beat is optional
+		}
 		r := supportedVersions[pkg]
 		got, ok := parseVersion(v[pkg])
 		if !ok || versionLess(got, r[0]) || !versionLess(got, r[1]) {
@@ -361,7 +367,10 @@ func (s *Scheduler) session(ctx context.Context) error {
 			return &FatalError{err}
 		}
 	}
-	if settings.UseTZ != settings.TZAware {
+	// django-celery-beat's tables are used only when that app is installed
+	// in the Django project (gobeat_sync records its version).
+	useDCB := settings.Versions["django_celery_beat"] != ""
+	if useDCB && settings.UseTZ != settings.TZAware {
 		return &FatalError{fmt.Errorf("USE_TZ=%v with DJANGO_CELERY_BEAT_TZ_AWARE=%v is not supported: Python beat itself mixes naive and aware datetimes in this combination", settings.UseTZ, settings.TZAware)}
 	}
 	if settings.TaskProtocol != 2 {
@@ -370,7 +379,7 @@ func (s *Scheduler) session(ctx context.Context) error {
 	if settings.TaskAlwaysEager {
 		return &FatalError{errors.New("task_always_eager is set: Python beat would execute tasks inline, which gobeat cannot do")}
 	}
-	if err := st.CheckSchema(ctx, settings.UseTZ); err != nil {
+	if err := st.CheckSchema(ctx, settings.UseTZ, useDCB); err != nil {
 		var se *store.SchemaError
 		if errors.As(err, &se) {
 			return &FatalError{err}
@@ -406,6 +415,8 @@ func (s *Scheduler) session(ctx context.Context) error {
 		s: s, st: st, settings: settings, version: version, builder: builder,
 		env: &schedule.Env{AppTZ: builder.AppTZ, TZAware: settings.TZAware, EnableUTC: settings.EnableUTC,
 			CronDeadline: settings.BeatCronDeadline},
+		// django_gobeat jobs are always evaluated time-zone aware
+		jobEnv:  &schedule.Env{AppTZ: builder.AppTZ, TZAware: true, EnableUTC: settings.EnableUTC},
 		maxLoop: time.Duration(settings.BeatMaxLoopInterval * float64(time.Second)),
 		refused: map[int64]string{},
 	}
@@ -502,7 +513,7 @@ func (r *run) loop(ctx context.Context) error {
 			} else if st.SettingsVersion != r.version {
 				return errSettingsChanged
 			}
-			if !markerEqual(st.Marker, r.lastMarker) {
+			if !markerEqual(st.Marker, r.lastMarker) || st.JobsMarker != r.lastJobs {
 				o.Log.Info("schedule changed")
 				if err := r.reload(ctx, "changed"); err != nil {
 					return err
@@ -574,26 +585,36 @@ func markerEqual(a, b *time.Time) bool {
 // refuse logs (once per distinct error) that a task is not scheduled.
 func (r *run) refuse(t *store.Task, err error) {
 	msg := err.Error()
-	if r.refused[t.ID] != msg {
+	if r.refused[t.Key()] != msg {
 		r.s.o.Log.Error("periodic task refused; it will not be scheduled", "name", t.Name, "task", t.Task,
-			"periodic_task_id", t.ID, "error", msg)
+			"source", sourceOf(t), "periodic_task_id", t.ID, "error", msg)
 		r.s.o.Metrics.Add("gobeat_errors_total", 1, "kind", "task")
 	}
-	r.refused[t.ID] = msg
+	r.refused[t.Key()] = msg
+}
+
+func sourceOf(t *store.Task) string {
+	if t.Source == "" {
+		return store.SourceDCB
+	}
+	return t.Source
 }
 
 // buildEntry turns a row into a schedulable entry and validates that its
 // message can be built. Parsing and validation are cached per row
 // definition: a 10,000 task schedule is re-read every five minutes.
 func (r *run) buildEntry(t store.Task, now time.Time) (*entry, error) {
-	e := &entry{row: t}
+	e := &entry{row: t, env: r.env}
+	if t.Source == store.SourceJob {
+		e.env = r.jobEnv
+	}
 	e.spec = schedule.Spec{Enabled: t.Enabled, OneOff: t.OneOff, StartTime: t.StartTime, Expires: t.Expires,
 		LastRunAt: t.LastRunAt, DateChanged: t.DateChanged, TotalRunCount: t.TotalRunCount}
 	e.in = message.Input{ID: t.ID, Name: t.Name, Task: t.Task, Args: t.Args, Kwargs: t.Kwargs, Headers: t.Headers,
 		Queue: t.Queue, Exchange: t.Exchange, RoutingKey: t.RoutingKey, Priority: t.Priority,
 		Expires: t.Expires, ExpireSeconds: t.ExpireSeconds}
 
-	c := r.s.cache[t.ID]
+	c := r.s.cache[t.Key()]
 	if c == nil || !sameDefinition(&c.row, &t) {
 		c = &cached{row: t}
 		c.cron, c.err = r.define(&t)
@@ -602,7 +623,7 @@ func (r *run) buildEntry(t store.Task, now time.Time) (*entry, error) {
 			// reported when it is loaded, not when it is due.
 			_, c.err = r.builder.Build(e.in, "00000000-0000-0000-0000-000000000000", now)
 		}
-		r.s.cache[t.ID] = c
+		r.s.cache[t.Key()] = c
 	}
 	if c.err != nil {
 		return nil, c.err
@@ -631,7 +652,10 @@ func (r *run) define(t *store.Task) (*schedule.Crontab, error) {
 		return nil, err
 	case t.Cron != nil:
 		tz := r.env.AppTZ
-		if r.env.TZAware {
+		switch {
+		case t.Source == store.SourceJob && t.Cron.Timezone == "":
+			// a Job without a zone uses the Celery timezone
+		case r.env.TZAware || t.Source == store.SourceJob:
 			var err error
 			if tz, err = loadLocation(t.Cron.Timezone); err != nil {
 				return nil, fmt.Errorf("crontab timezone %q: %w", t.Cron.Timezone, err)
@@ -673,7 +697,7 @@ func (r *run) reload(ctx context.Context, reason string) error {
 		return err
 	}
 	now := o.Clock.Now()
-	r.lastMarker, r.lastFull = st.Marker, now
+	r.lastMarker, r.lastJobs, r.lastFull = st.Marker, st.JobsMarker, now
 	o.Metrics.Add("gobeat_reloads_total", 1, "reason", reason)
 
 	if r.s.cache == nil || r.s.cacheVer != r.version {
@@ -688,7 +712,7 @@ func (r *run) reload(ctx context.Context, reason string) error {
 		if o.DryRun {
 			// Shadow mode never writes, so remember our own dispatches
 			// like Python's in-memory entries do.
-			if d, ok := r.s.dryLast[t.ID]; ok {
+			if d, ok := r.s.dryLast[t.Key()]; ok {
 				if d.done {
 					continue
 				}
@@ -701,15 +725,15 @@ func (r *run) reload(ctx context.Context, reason string) error {
 				}
 			}
 		}
-		seenIDs[t.ID] = struct{}{}
+		seenIDs[t.Key()] = struct{}{}
 		e, err := r.buildEntry(t, now)
 		var res schedule.Result
 		if err == nil {
-			res, err = e.spec.IsDue(r.env, now)
+			res, err = e.spec.IsDue(e.env, now)
 		}
 		if err != nil {
 			r.refuse(&t, err)
-			stillRefused[t.ID] = r.refused[t.ID]
+			stillRefused[t.Key()] = r.refused[t.Key()]
 			continue
 		}
 		if res.Action != schedule.ActNone {
@@ -771,19 +795,20 @@ func (r *run) act(ctx context.Context, e *entry, a schedule.Action, now time.Tim
 		if o.DryRun {
 			return nil
 		}
-		return r.st.DisableExpired(ctx, e.row.ID, now)
+		return r.st.DisableExpired(ctx, e.row.Source, e.row.ID, now)
 	case schedule.ActDisableOneOff:
 		o.Log.Info("one-off periodic task has run; disabling it", "name", e.row.Name, "periodic_task_id", e.row.ID, "dry_run", o.DryRun)
 		if o.DryRun {
 			return nil
 		}
-		return r.st.DisableOneOff(ctx, e.row.ID, now)
+		return r.st.DisableOneOff(ctx, e.row.Source, e.row.ID, now)
 	}
 	return nil
 }
 
 // TaskID derives the deterministic Celery task id for a run: UUIDv5 over
-// "<periodic task id>:<scheduled instant in µs since the epoch>".
+// "<task key>:<scheduled instant in µs since the epoch>", where the key
+// is store.Task.Key (the primary key, negated for django_gobeat jobs).
 func TaskID(periodicTaskID int64, scheduled time.Time) string {
 	// namespace: UUIDv5(NAMESPACE_DNS, "gobeat.dispatch")
 	ns := [16]byte{0x6f, 0x1c, 0x53, 0x0a, 0x2f, 0x0e, 0x5b, 0x9d, 0x9a, 0x44, 0x67, 0x6f, 0x62, 0x65, 0x61, 0x74}
@@ -799,7 +824,7 @@ func TaskID(periodicTaskID int64, scheduled time.Time) string {
 // process is one Scheduler.tick for the entry at the top of the heap.
 func (r *run) process(ctx context.Context, e *entry, now time.Time) error {
 	o := &r.s.o
-	res, err := e.spec.IsDue(r.env, now)
+	res, err := e.spec.IsDue(e.env, now)
 	if err != nil {
 		r.refuse(&e.row, err)
 		r.remove(e)
@@ -825,7 +850,7 @@ func (r *run) process(ctx context.Context, e *entry, now time.Time) error {
 			"scheduled", res.DueAt.Format(time.RFC3339Nano), "late_seconds", lateness.Seconds(), "dry_run", o.DryRun)
 		o.Metrics.Add("gobeat_skipped_runs_total", 1, "reason", "missed")
 		if !o.DryRun {
-			ok, err := r.st.Skip(ctx, e.row.ID, seen, now)
+			ok, err := r.st.Skip(ctx, e.row.Source, e.row.ID, seen, now)
 			if err != nil {
 				return err
 			}
@@ -835,7 +860,7 @@ func (r *run) process(ctx context.Context, e *entry, now time.Time) error {
 		}
 		r.advance(e, now, false)
 		// the schedule is now relative to `now`
-		res2, err := e.spec.IsDue(r.env, now)
+		res2, err := e.spec.IsDue(e.env, now)
 		if err == nil && !res2.Due {
 			next = now.Add(seconds(res2.Next))
 		}
@@ -843,7 +868,7 @@ func (r *run) process(ctx context.Context, e *entry, now time.Time) error {
 		return nil
 	}
 
-	taskID := TaskID(e.row.ID, res.DueAt)
+	taskID := TaskID(e.row.Key(), res.DueAt)
 	msg, err := r.builder.Build(e.in, taskID, now)
 	if err != nil {
 		r.refuse(&e.row, err)
@@ -855,7 +880,8 @@ func (r *run) process(ctx context.Context, e *entry, now time.Time) error {
 		if msg.Queue != nil {
 			q = msg.Queue.Name
 		}
-		o.Log.Info(event, "name", e.row.Name, "task", e.row.Task, "periodic_task_id", e.row.ID, "task_id", taskID,
+		o.Log.Info(event, "name", e.row.Name, "task", e.row.Task, "source", sourceOf(&e.row),
+			"periodic_task_id", e.row.ID, "task_id", taskID,
 			"scheduled", res.DueAt.Format("2006-01-02T15:04:05.000000Z07:00"), "late_seconds", lateness.Seconds(),
 			"queue", q, "exchange", msg.Exchange, "routing_key", msg.RoutingKey, "dry_run", o.DryRun)
 	}
@@ -865,7 +891,7 @@ func (r *run) process(ctx context.Context, e *entry, now time.Time) error {
 		o.Metrics.Add("gobeat_dispatch_total", 1, "result", "dry_run")
 		r.advance(e, now, true)
 		d := dryState{lastRunAt: now, count: e.spec.TotalRunCount, done: e.spec.OneOff}
-		r.s.dryLast[e.row.ID] = d
+		r.s.dryLast[e.row.Key()] = d
 		if e.spec.OneOff {
 			r.remove(e)
 			return nil
@@ -881,14 +907,14 @@ func (r *run) process(ctx context.Context, e *entry, now time.Time) error {
 	// Claim before publish. These calls deliberately ignore cancellation:
 	// a claim that has started is seen through to the journal.
 	opCtx := context.WithoutCancel(ctx)
-	ok, journalID, err := r.st.Claim(opCtx, store.Claim{PeriodicTaskID: e.row.ID, SeenLastRunAt: seen, Now: now,
+	ok, journalID, err := r.st.Claim(opCtx, store.Claim{Source: e.row.Source, PeriodicTaskID: e.row.ID, SeenLastRunAt: seen, Now: now,
 		ScheduledFor: res.DueAt, TaskID: taskID, Name: e.row.Name, Task: e.row.Task, Message: js})
 	if errors.Is(err, store.ErrDuplicateRun) {
 		// This exact run is already in the journal (for example the
 		// clock stepped back). Never publish it twice: move on.
 		o.Log.Warn("run already dispatched; suppressing duplicate", "name", e.row.Name, "task_id", taskID)
 		o.Metrics.Add("gobeat_skipped_runs_total", 1, "reason", "duplicate")
-		ok, err := r.st.Skip(opCtx, e.row.ID, seen, now)
+		ok, err := r.st.Skip(opCtx, e.row.Source, e.row.ID, seen, now)
 		if err != nil {
 			return err
 		}

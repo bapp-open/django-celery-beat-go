@@ -729,3 +729,53 @@ func TestIntervalsAreUnaffectedByDST(t *testing.T) {
 		t.Fatalf("hourly %d, fast %d, minutely %d; want 5, 1800, 300", w.broker.n("hourly"), w.broker.n("fast"), w.broker.n("minutely"))
 	}
 }
+
+func TestGobeatJobsWithoutDjangoCeleryBeat(t *testing.T) {
+	// The settings row of a project without django-celery-beat records
+	// no version for it; only django_gobeat's own jobs are scheduled.
+	w := newWorld(t, "Asia/Tokyo")
+	doc := strings.Replace(string(settingsDoc("Asia/Tokyo")), `, "django_celery_beat": "2.9.0"`, ``, 1)
+	w.db.SetSettings([]byte(doc), "v1")
+
+	every := int64(15_000_000) // microseconds
+	period := "microseconds"
+	interval := store.Task{Source: store.SourceJob, ID: 1, Name: "app.cron.Heartbeat", Task: "app.cron.Heartbeat",
+		IntervalEvery: &every, IntervalPeriod: &period, Args: "[]", Kwargs: "{}", Enabled: true, DateChanged: t0}
+	// no zone on the job: the crontab is evaluated in the Celery timezone
+	nightly := store.Task{Source: store.SourceJob, ID: 2, Name: "app.cron.Nightly", Task: "app.cron.Nightly",
+		Cron: &store.CronRow{Minute: "30", Hour: "10", DayOfWeek: "*", DayOfMonth: "*", MonthOfYear: "*"},
+		Args: "[]", Kwargs: "{}", Enabled: true, DateChanged: t0}
+	// a django-celery-beat row with the same primary key must not collide
+	same := intervalTask(1, "dcb-row", 20, "seconds")
+	w.db.Put(interval)
+	w.db.Put(nightly)
+	w.db.Put(same)
+	if err := w.runUntil(t0.Add(2 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if n := w.broker.n("app.cron.Heartbeat"); n != 480 {
+		t.Fatalf("interval job ran %d times, want 480", n)
+	}
+	if n := w.broker.n("dcb-row"); n != 360 {
+		t.Fatalf("PeriodicTask with the same id ran %d times, want 360", n)
+	}
+	var at time.Time
+	ids := map[string]bool{}
+	for _, r := range w.db.Journal() {
+		if r.Name == "app.cron.Nightly" {
+			at = r.ClaimedAt
+		}
+		if ids[r.TaskID] {
+			t.Fatalf("task id %s reused across sources", r.TaskID)
+		}
+		ids[r.TaskID] = true
+	}
+	// 10:30 in Tokyo is 01:30 UTC
+	if !at.Equal(t0.Add(90 * time.Minute)) {
+		t.Fatalf("crontab job ran at %v, want 01:30 UTC", at)
+	}
+	job, _ := w.db.Get(-1)
+	if job.TotalRunCount != 480 || job.LastRunAt == nil {
+		t.Fatalf("job bookkeeping: %+v", job)
+	}
+}

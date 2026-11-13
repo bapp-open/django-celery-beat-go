@@ -16,10 +16,17 @@ class Command(BaseCommand):
         parser.add_argument('ops')
 
     def handle(self, *args, **opts):
-        from django_celery_beat.models import (ClockedSchedule,
-                                               CrontabSchedule,
-                                               IntervalSchedule, PeriodicTask,
-                                               SolarSchedule)
+        from django.apps import apps
+        from django_gobeat.models import Dispatch, Job
+        from runlog.models import Run
+        has_dcb = apps.is_installed('django_celery_beat')
+        if has_dcb:
+            from django_celery_beat.models import (ClockedSchedule,
+                                                   CrontabSchedule,
+                                                   IntervalSchedule,
+                                                   PeriodicTask,
+                                                   PeriodicTasks,
+                                                   SolarSchedule)
         out = []
         for op in json.loads(opts['ops']):
             kind = op.pop('op')
@@ -60,14 +67,28 @@ class Command(BaseCommand):
                 PeriodicTask.objects.get(name=op['name']).delete()
                 out.append(None)
             elif kind == 'reset':
-                # leave only what the test creates
-                PeriodicTask.objects.all().delete()
-                from django_celery_beat.models import PeriodicTasks
-                from django_gobeat.models import Dispatch
-                from runlog.models import Run
+                # leave only what the test creates; code-defined jobs stay
+                # but are paused (the admin's switch)
+                if has_dcb:
+                    PeriodicTask.objects.all().delete()
+                    PeriodicTasks.update_changed()
+                Job.objects.filter(source='admin').delete()
+                for job in Job.objects.filter(paused=False):
+                    job.paused = True
+                    job.save()
                 Run.objects.all().delete()
                 Dispatch.objects.all().delete()
-                PeriodicTasks.update_changed()
+                out.append(None)
+            elif kind == 'job_update':
+                job = Job.objects.get(name=op.pop('name'))
+                for k, v in op.items():
+                    setattr(job, k, v)
+                job.save()
+                out.append(job.pk)
+            elif kind == 'job_create':
+                out.append(Job.objects.create(**op).pk)
+            elif kind == 'job_delete':
+                Job.objects.get(name=op['name']).delete()
                 out.append(None)
             else:
                 raise SystemExit('unknown op %r' % kind)

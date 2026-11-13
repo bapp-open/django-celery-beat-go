@@ -22,11 +22,22 @@ type CronRow struct {
 	Timezone                                         string
 }
 
-// Task is one enabled PeriodicTask row joined with its schedule.
+// Schedule sources.
+const (
+	// SourceDCB is django-celery-beat's PeriodicTask table (optional).
+	SourceDCB = "dcb"
+	// SourceJob is django_gobeat's own Job table (cron.py jobs).
+	SourceJob = "job"
+)
+
+// Task is one enabled periodic task: a django-celery-beat PeriodicTask
+// joined with its schedule, or a django_gobeat Job.
 type Task struct {
-	ID   int64
-	Name string
-	Task string
+	// Source is SourceDCB or SourceJob ("" means SourceDCB).
+	Source string
+	ID     int64
+	Name   string
+	Task   string
 
 	IntervalEvery  *int64
 	IntervalPeriod *string
@@ -51,8 +62,18 @@ type Task struct {
 	DateChanged   time.Time
 }
 
+// Key identifies a task across both sources: the primary key for
+// django-celery-beat rows, its negation for django_gobeat jobs.
+func (t *Task) Key() int64 {
+	if t.Source == SourceJob {
+		return -t.ID
+	}
+	return t.ID
+}
+
 // Claim is one run to be claimed atomically with its journal row.
 type Claim struct {
+	Source         string
 	PeriodicTaskID int64
 	// SeenLastRunAt is the last_run_at value the decision was based on
 	// (nil for NULL); the claim succeeds only if the row still has it.
@@ -78,8 +99,11 @@ type Pending struct {
 
 // State is the cheap "did anything change" probe.
 type State struct {
-	Marker          *time.Time // PeriodicTasks.last_update (nil when absent)
-	SettingsVersion string     // "" when the settings row is missing
+	Marker *time.Time // PeriodicTasks.last_update (nil when absent)
+	// JobsMarker changes whenever a django_gobeat Job definition is
+	// added, edited or removed.
+	JobsMarker      string
+	SettingsVersion string // "" when the settings row is missing
 }
 
 // Store is everything the scheduler needs from the database. A Store is
@@ -90,10 +114,10 @@ type Store interface {
 	TryLock(ctx context.Context) (bool, error)
 	// Settings returns the settings document and its version hash.
 	Settings(ctx context.Context) (data []byte, version string, err error)
-	// CheckSchema verifies the django-celery-beat and django_gobeat
-	// tables look like a schema this binary knows. useTZ is the Django
-	// USE_TZ setting from the settings row.
-	CheckSchema(ctx context.Context, useTZ bool) error
+	// CheckSchema verifies that the django_gobeat tables - and, when
+	// useDCB is set (django-celery-beat is installed), its tables - look
+	// like a schema this binary knows. useTZ is Django's USE_TZ.
+	CheckSchema(ctx context.Context, useTZ, useDCB bool) error
 	// State returns the change marker and settings version.
 	State(ctx context.Context) (State, error)
 	// Tasks loads all enabled periodic tasks.
@@ -106,7 +130,7 @@ type Store interface {
 	Claim(ctx context.Context, c Claim) (ok bool, journalID int64, err error)
 	// Skip advances last_run_at with the same compare-and-swap but
 	// without counting or journaling a run (missed-run policy "skip").
-	Skip(ctx context.Context, id int64, seen *time.Time, now time.Time) (bool, error)
+	Skip(ctx context.Context, source string, id int64, seen *time.Time, now time.Time) (bool, error)
 	// MarkPublished records that the broker accepted the message.
 	MarkPublished(ctx context.Context, journalID int64, now time.Time) error
 	// MarkAttempt records a failed publish attempt.
@@ -116,10 +140,10 @@ type Store interface {
 	// Pending returns claimed-but-unpublished journal rows, oldest first.
 	Pending(ctx context.Context) ([]Pending, error)
 	// DisableExpired is ModelEntry._disable for an expired task.
-	DisableExpired(ctx context.Context, id int64, now time.Time) error
+	DisableExpired(ctx context.Context, source string, id int64, now time.Time) error
 	// DisableOneOff disables a one_off task that has run, resets its
 	// run count and touches the change marker, as ModelEntry.is_due does.
-	DisableOneOff(ctx context.Context, id int64, now time.Time) error
+	DisableOneOff(ctx context.Context, source string, id int64, now time.Time) error
 	// Prune deletes published/abandoned journal rows older than before.
 	Prune(ctx context.Context, before time.Time) error
 

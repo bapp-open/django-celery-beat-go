@@ -73,6 +73,11 @@ def journal(name):
                 % name)
 
 
+def job_row(name):
+    rows = psql("select * from django_gobeat_job where name = '%s'" % name)
+    return rows[0] if rows else None
+
+
 def task_row(name):
     rows = psql("select * from django_celery_beat_periodictask "
                 "where name = '%s'" % name)
@@ -184,6 +189,9 @@ def stack():
 @pytest.fixture(autouse=True)
 def clean():
     """Start every test from an empty schedule with gobeat as sole leader."""
+    ctl({'op': 'reset'})
+    # a message dispatched just before the reset may still be executing
+    time.sleep(1.5)
     ctl({'op': 'reset'})
     yield
     ctl({'op': 'reset'})
