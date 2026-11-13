@@ -1,0 +1,73 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  go:
+    name: unit, differential, soak (race + leak checks), fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make test
+      - run: make fuzz FUZZTIME=30s
+      - run: make build
+
+  differential:
+    name: goldens regenerated from real Celery (version matrix)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        ports: ["5672:5672"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: wait for RabbitMQ
+        run: for i in $(seq 60); do nc -z 127.0.0.1 5672 && break; sleep 2; done; sleep 10
+      - name: every supported version must reproduce the committed goldens byte for byte
+        run: make matrix
+      - name: Python beat soak reference (small) must reproduce
+        run: make soak-check
+
+  integration:
+    name: integration + failure injection + shadow (${{ matrix.broker }}, celery ${{ matrix.celery }}, dcb ${{ matrix.dcb }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        broker: [redis, amqp]
+        celery: ["5.5.3"]
+        dcb: ["2.8.1"]
+        include:
+          - {broker: redis, celery: "5.6.3", dcb: "2.9.0"}
+          - {broker: amqp, celery: "5.6.3", dcb: "2.9.0"}
+    env:
+      BROKER: ${{ matrix.broker }}
+      CELERY_VERSION: ${{ matrix.celery }}
+      DCB_VERSION: ${{ matrix.dcb }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: make build images
+      - run: pip install pytest
+      - working-directory: tests/integration
+        run: python -m pytest -x -q test_integration.py test_failures.py test_shadow.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.broker }}-${{ matrix.celery }}-${{ matrix.dcb }}
+          path: tests/integration/.artifacts/*.log

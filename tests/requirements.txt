@@ -1,0 +1,7 @@
+# Pinned reference versions: the golden files are generated with these.
+celery[redis]==5.5.3
+kombu==5.5.4
+django-celery-beat==2.8.1
+Django==5.2.*
+time-machine>=2.14
+pytest>=8

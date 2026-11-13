@@ -19,7 +19,7 @@ const NotifyChannel = "gobeat"
 const DefaultLockKey int64 = 0x676f62656174
 
 // knownMigrations are the django_celery_beat migrations of the supported
-// releases (2.7.0 - 2.9.0 all end at 0019). A database with a migration
+// releases (2.8.0 - 2.9.0 end at 0019). A database with a migration
 // that is not in this list has a schema this binary has never seen.
 var knownMigrations = map[string]bool{
 	"0001_initial": true, "0002_auto_20161118_0346": true, "0003_auto_20161209_0049": true,
@@ -165,7 +165,7 @@ func (s *pg) CheckSchema(ctx context.Context, useTZ bool) error {
 		return &SchemaError{fmt.Sprintf("django_celery_beat migration(s) %s are not known to this gobeat build; upgrade gobeat before upgrading django-celery-beat", strings.Join(unknown, ", "))}
 	}
 	if !hasRequired {
-		return &SchemaError{fmt.Sprintf("django_celery_beat migration %s is not applied; supported django-celery-beat versions are 2.7 - 2.9", requiredMigration)}
+		return &SchemaError{fmt.Sprintf("django_celery_beat migration %s is not applied; supported django-celery-beat versions are 2.8 and 2.9", requiredMigration)}
 	}
 
 	rows, err = s.conn.Query(ctx, `SELECT table_name, column_name, data_type FROM information_schema.columns

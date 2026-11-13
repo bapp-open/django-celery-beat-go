@@ -275,6 +275,9 @@ def generators(G):
             settings_doc = build_settings(rapp, extra_task_names=[
                 'not.registered', 't.glob.unregistered'])
             settings_doc['broker_url'] = None
+            # keep the golden file independent of the library versions so
+            # that matrix.sh can compare it byte for byte
+            settings_doc['versions'] = {}
             out.add({'profile': profile, 'settings': settings_doc,
                      'origin': ORIGIN, 'reply_to': REPLY_TO})
 

@@ -11,8 +11,8 @@ license = { text = "MIT" }
 requires-python = ">=3.9"
 dependencies = [
     "Django>=4.2",
-    "celery>=5.4,<5.8",
-    "django-celery-beat>=2.7,<2.10",
+    "celery>=5.5.2,<5.7",
+    "django-celery-beat>=2.8,<2.10",
 ]
 
 [tool.setuptools.packages.find]

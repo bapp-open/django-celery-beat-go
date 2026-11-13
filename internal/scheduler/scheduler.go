@@ -278,26 +278,58 @@ type run struct {
 	needReload bool
 }
 
-// supported major.minor versions (verified by tests/differential/matrix.sh)
-var supportedVersions = map[string][]string{
-	"celery":             {"5.4", "5.5", "5.6", "5.7"},
-	"django_celery_beat": {"2.7", "2.8", "2.9"},
+// Supported version ranges [min, max): every golden file regenerated with
+// releases inside them is byte-identical to the pinned ones
+// (tests/differential/matrix.sh). Outside them behaviour is known to
+// differ: Celery < 5.5.2 and >= 5.7 compute crontab times differently
+// around DST (and 5.7 changes saferepr and the message), and
+// django-celery-beat 2.7 starts a never-run task from "now" instead of
+// date_changed.
+var supportedVersions = map[string][2][3]int{
+	"celery":             {{5, 5, 2}, {5, 7, 0}},
+	"django_celery_beat": {{2, 8, 0}, {2, 10, 0}},
+}
+
+func parseVersion(v string) ([3]int, bool) {
+	var out [3]int
+	parts := strings.SplitN(v, ".", 4)
+	if len(parts) < 2 {
+		return out, false
+	}
+	for i := 0; i < 3 && i < len(parts); i++ {
+		n := 0
+		digits := 0
+		for _, c := range parts[i] {
+			if c < '0' || c > '9' {
+				break
+			}
+			n = n*10 + int(c-'0')
+			digits++
+		}
+		if digits == 0 {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
+}
+
+func versionLess(a, b [3]int) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
 }
 
 func checkVersions(v map[string]string) error {
-	for pkg, ok := range supportedVersions {
-		got := v[pkg]
-		parts := strings.SplitN(got, ".", 3)
-		mm := got
-		if len(parts) >= 2 {
-			mm = parts[0] + "." + parts[1]
-		}
-		found := false
-		for _, s := range ok {
-			found = found || s == mm
-		}
-		if !found {
-			return fmt.Errorf("%s %s is not a supported version (supported: %s); set GOBEAT_ALLOW_UNSUPPORTED_VERSIONS=1 to run anyway", pkg, got, strings.Join(ok, ", "))
+	for _, pkg := range []string{"celery", "django_celery_beat"} {
+		r := supportedVersions[pkg]
+		got, ok := parseVersion(v[pkg])
+		if !ok || versionLess(got, r[0]) || !versionLess(got, r[1]) {
+			return fmt.Errorf("%s %s is not a supported version (supported: >= %d.%d.%d, < %d.%d); set GOBEAT_ALLOW_UNSUPPORTED_VERSIONS=1 to run anyway",
+				pkg, v[pkg], r[0][0], r[0][1], r[0][2], r[1][0], r[1][1])
 		}
 	}
 	return nil
