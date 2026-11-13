@@ -5,7 +5,8 @@ import (
 	"strings"
 )
 
-// Port of celery/utils/saferepr.py (saferepr, _saferepr, reprstream) for
+// Port of celery/utils/saferepr.py as of Celery 5.7 (saferepr, _saferepr,
+// reprstream) for
 // the value types JSON can produce, plus the empty tuple Celery passes
 // when a task has no positional arguments.
 
@@ -93,8 +94,11 @@ func formatChars(s Str, maxlen int, limited bool) string {
 
 // SafeRepr is celery.utils.saferepr.saferepr(o, maxlen, maxlevels=3).
 // maxlen < 0 means None (no limit).
-func SafeRepr(o Value, maxlen int) string {
-	const maxlevels = 3
+func SafeRepr(o Value, maxlen int) string { return SafeReprLevels(o, maxlen, 3) }
+
+// SafeReprLevels is saferepr with an explicit maxlevels
+// (app.conf.task_repr_maxlevels); 0 disables the nesting limit.
+func SafeReprLevels(o Value, maxlen, maxlevels int) string {
 	limited := maxlen >= 0
 	var sb strings.Builder
 	stack := []*iter{{toks: []tok{{kind: tokValue, val: o}}}}
@@ -124,20 +128,26 @@ outer:
 			case tokLiteral:
 				level += t.direction
 				if limited && maxlen <= 0 {
-					broke = it
+					if t.direction < 0 {
+						// "the truncated value was the last one in its
+						// container: nothing is left out, so just close it"
+						sb.WriteString(t.lit)
+						continue
+					}
+					broke = &iter{toks: []tok{t}, next: it}
 					break outer
 				}
 				emit(t.lit)
 				continue
 			case tokKey:
 				if limited && maxlen <= 0 {
-					broke = it
+					broke = &iter{toks: []tok{t}, next: it}
 					break outer
 				}
 				if limited {
-					val = SafeRepr(t.key, maxlen)
+					val = SafeReprLevels(t.key, maxlen, maxlevels)
 				} else {
-					val = SafeRepr(t.key, -1)
+					val = SafeReprLevels(t.key, -1, maxlevels)
 				}
 				emit(val)
 				continue
@@ -159,7 +169,7 @@ outer:
 				val = FloatRepr(x)
 			case Str:
 				if limited && maxlen <= 0 {
-					broke = it
+					broke = &iter{toks: []tok{t}, next: it}
 					break outer
 				}
 				emit(formatChars(x, maxlen, limited))
@@ -187,8 +197,14 @@ outer:
 				panic("pyjson: unsupported value type in SafeRepr")
 			}
 			if start.kind == tokLiteral {
-				if level >= maxlevels {
-					val = start.lit + "..." + end.lit
+				if maxlevels != 0 && level >= maxlevels {
+					// a literal: not truncated, never a "dangling paren"
+					if limited && maxlen <= 0 {
+						broke = &iter{toks: []tok{t}, next: it}
+						break outer
+					}
+					emit(start.lit + "..." + end.lit)
+					continue
 				} else {
 					toks := make([]tok, 0, len(children)+3)
 					toks = append(toks, start)
@@ -199,7 +215,7 @@ outer:
 				}
 			}
 			if limited && maxlen <= 0 {
-				broke = it
+				broke = &iter{toks: []tok{t}, next: it}
 				break outer
 			}
 			if limited {
@@ -210,8 +226,11 @@ outer:
 	}
 	if broke != nil {
 		sb.WriteString(", ...")
-		// "move rest back to stack, so that we can include dangling parens"
+		// "move rest back to stack, so that we can include dangling
+		// parens. The token we just pulled goes back too: if it opens a
+		// container, the pass below has to know."
 		stack = append(stack, broke)
+		depth := 0
 		for _, rest := range stack {
 			for {
 				t, ok := rest.pop()
@@ -219,7 +238,13 @@ outer:
 					break
 				}
 				if t.kind == tokLiteral && !t.truncate {
-					sb.WriteString(t.lit)
+					// "a container opened after the limit isn't shown,
+					// so its closing paren is skipped as well"
+					depth += t.direction
+					if depth < 0 {
+						depth = 0
+						sb.WriteString(t.lit)
+					}
 				}
 			}
 		}

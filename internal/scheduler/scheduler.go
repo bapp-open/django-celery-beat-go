@@ -278,15 +278,13 @@ type run struct {
 	needReload bool
 }
 
-// Supported version ranges [min, max): every golden file regenerated with
-// releases inside them is byte-identical to the pinned ones
-// (tests/differential/matrix.sh). Outside them behaviour is known to
-// differ: Celery < 5.5.2 and >= 5.7 compute crontab times differently
-// around DST (and 5.7 changes saferepr and the message), and
-// django-celery-beat 2.7 starts a never-run task from "now" instead of
-// date_changed.
+// Supported version ranges [min, max). gobeat tracks the latest stable
+// Celery only: the golden files are generated with Celery 5.7.0, and
+// earlier releases compute crontab times, interval arithmetic across DST
+// and the message itself differently. django-celery-beat is optional;
+// when its tables are used, 2.8 and 2.9 behave identically.
 var supportedVersions = map[string][2][3]int{
-	"celery":             {{5, 5, 2}, {5, 7, 0}},
+	"celery":             {{5, 7, 0}, {5, 8, 0}},
 	"django_celery_beat": {{2, 8, 0}, {2, 10, 0}},
 }
 

@@ -229,8 +229,8 @@ func TestRefusesToStartWithoutSettingsRow(t *testing.T) {
 
 func TestRefusesUnsupportedVersionsAndConfigurations(t *testing.T) {
 	for name, mutate := range map[string]func(string) string{
-		"celery 4":     func(s string) string { return strings.Replace(s, `"celery": "5.5.3"`, `"celery": "4.4.7"`, 1) },
-		"dcb 2.5":      func(s string) string { return strings.Replace(s, `"2.8.1"`, `"2.5.0"`, 1) },
+		"celery 4":     func(s string) string { return strings.Replace(s, `"celery": "5.7.0"`, `"celery": "4.4.7"`, 1) },
+		"dcb 2.5":      func(s string) string { return strings.Replace(s, `"2.9.0"`, `"2.5.0"`, 1) },
 		"schema 2":     func(s string) string { return strings.Replace(s, `"schema": 1`, `"schema": 2`, 1) },
 		"protocol 1":   func(s string) string { return strings.Replace(s, `"task_protocol": 2`, `"task_protocol": 1`, 1) },
 		"naive/aware":  func(s string) string { return strings.Replace(s, `"tz_aware": true`, `"tz_aware": false`, 1) },
@@ -684,19 +684,12 @@ func TestDryRunWritesNothing(t *testing.T) {
 	}
 }
 
-func TestDSTFallBackFollowsPythonAndDoesNotBlockOthers(t *testing.T) {
+func TestIntervalsAreUnaffectedByDST(t *testing.T) {
 	// App timezone with DST, autumn change (2024-10-27 01:00 UTC,
-	// 04:00 EEST -> 03:00 EET).
-	//
-	// 1. Interval schedules follow Python: celery.utils.time.remaining
-	//    adds the interval in wall-clock time and resolves it with
-	//    fold=0, so the repeated hour is skipped: a run at 03:59:50 EEST
-	//    is followed by 04:00:00 EET, one real hour later.
-	// 2. While an interval entry sits at the top of Python's heap "not
-	//    due" (its key was computed as now + interval), Python re-checks
-	//    only that entry (celery/beat.py: Scheduler.tick) and starves
-	//    every other entry until the next forced reload. gobeat re-keys
-	//    it instead: the every-minute crontab below never misses a beat.
+	// 04:00 EEST -> 03:00 EET). Since Celery 5.7 intervals are added in
+	// elapsed time (celery.utils.time.add_seconds_to_datetime), so
+	// nothing pauses or doubles in the repeated hour, and no entry can
+	// hold up another one.
 	w := newWorld(t, "Europe/Bucharest")
 	start := time.Date(2024, 10, 26, 22, 30, 0, 0, time.UTC) // 01:30 EEST
 	w.clk.Set(start)
@@ -706,44 +699,33 @@ func TestDSTFallBackFollowsPythonAndDoesNotBlockOthers(t *testing.T) {
 	fast.DateChanged = start
 	minutely := cronTask(3, "minutely", "*", "*", "*", "*", "*", "UTC")
 	minutely.DateChanged = start
+	// A crontab *in the DST zone* is wall-clock by definition: after
+	// 03:59 EEST the next matching wall time is 04:00, which only exists
+	// as EET - Celery (and so gobeat) skips the repeated hour.
+	local := cronTask(4, "local-minutely", "*", "*", "*", "*", "*", "Europe/Bucharest")
+	local.DateChanged = start
+	w.db.Put(local)
 	w.db.Put(hourly)
 	w.db.Put(fast)
 	w.db.Put(minutely)
 	if err := w.runUntil(start.Add(5 * time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	j := w.db.Journal()
-	var hours, gaps []time.Duration
-	var prevFast, prevMin time.Time
-	for _, r := range j {
-		switch r.Name {
-		case "hourly":
-			hours = append(hours, r.ClaimedAt.Sub(start))
-		case "fast":
-			if !prevFast.IsZero() && r.ClaimedAt.Sub(prevFast) != 10*time.Second {
-				gaps = append(gaps, r.ClaimedAt.Sub(prevFast))
-				if !prevFast.Equal(time.Date(2024, 10, 27, 0, 59, 50, 0, time.UTC)) {
-					t.Fatalf("unexpected gap after %v", prevFast)
-				}
-			}
-			prevFast = r.ClaimedAt
-		case "minutely":
-			if !prevMin.IsZero() && r.ClaimedAt.Sub(prevMin) != time.Minute {
-				t.Fatalf("crontab task was starved: %v -> %v", prevMin, r.ClaimedAt)
-			}
-			prevMin = r.ClaimedAt
+	prev := map[string]time.Time{}
+	step := map[string]time.Duration{"hourly": time.Hour, "fast": 10 * time.Second, "minutely": time.Minute}
+	for _, r := range w.db.Journal() {
+		if r.Name == "local-minutely" {
+			continue
 		}
+		if p, ok := prev[r.Name]; ok && r.ClaimedAt.Sub(p) != step[r.Name] {
+			t.Fatalf("%s: %v -> %v, want a steady %v", r.Name, p, r.ClaimedAt, step[r.Name])
+		}
+		prev[r.Name] = r.ClaimedAt
 	}
-	// 01:30 EEST -> 02:30 EEST -> 03:30 EEST (first 03:30) -> 04:30 wall,
-	// which only exists as EET, two real hours later.
-	want := []time.Duration{time.Hour, 2 * time.Hour, 4 * time.Hour, 5 * time.Hour}
-	if len(hours) != len(want) || hours[0] != want[0] || hours[1] != want[1] || hours[2] != want[2] || hours[3] != want[3] {
-		t.Fatalf("hourly runs at %v, want %v (Python wall-clock arithmetic)", hours, want)
+	if n := w.broker.n("local-minutely"); n != 240 {
+		t.Fatalf("crontab in the DST zone ran %d times, want 240 (repeated hour skipped, as Celery does)", n)
 	}
-	if len(gaps) != 1 || gaps[0] != time.Hour+10*time.Second {
-		t.Fatalf("10 s interval gaps %v, want exactly one of 1h0m10s (Python skips the repeated hour)", gaps)
-	}
-	if w.broker.n("minutely") != 300 {
-		t.Fatalf("minutely ran %d times, want 300", w.broker.n("minutely"))
+	if w.broker.n("hourly") != 5 || w.broker.n("fast") != 1800 || w.broker.n("minutely") != 300 {
+		t.Fatalf("hourly %d, fast %d, minutely %d; want 5, 1800, 300", w.broker.n("hourly"), w.broker.n("fast"), w.broker.n("minutely"))
 	}
 }

@@ -8,14 +8,8 @@ dispatched. internal/scheduler/soak_test.go replays the same task set
 through gobeat and must arrive at exactly the same counts.
 
 The task set uses intervals, crontabs in ten time zones (two DST changes
-fall inside the period), start_time, null and non-null last_run_at and
-clocked one-off tasks. It deliberately contains no `expires` and no
-one-off *interval* tasks: when such an entry is finished Python beat keeps
-it at the top of its heap, "not due", and re-checks only that entry
-(celery/beat.py: Scheduler.tick) until the next schedule reload - 5 s
-later for a one-off, up to 5 minutes later for an expiry - delaying every
-other task meanwhile. gobeat does not copy that head-of-line blocking
-(README, "Known differences"), so counts would differ by design.
+fall inside the period), start_time, expires, one-off tasks, null and
+non-null last_run_at and clocked tasks.
 
 Only two things differ from a production beat:
   * apply_entry counts instead of publishing;
@@ -126,6 +120,11 @@ def make_specs():
             if rng.random() < 0.10:
                 s['start_time'] = iso(T0 + timedelta(
                     seconds=round(rng.uniform(0, span * 0.7), 3)))
+            if rng.random() < 0.06:
+                s['expires'] = iso(T0 + timedelta(
+                    seconds=round(rng.uniform(span * 0.2, span * 0.9), 3)))
+            if rng.random() < 0.05:
+                s['one_off'] = True
         specs.append(s)
     return specs
 

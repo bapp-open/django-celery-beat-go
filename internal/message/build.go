@@ -293,6 +293,9 @@ func (b *Builder) Build(in Input, taskID string, now time.Time) (*Message, error
 		return nil, fmt.Errorf("%w: headers must be a JSON object", ErrUnsupported)
 	}
 	entryHeaders.Set("periodic_task_name", pyjson.Str(in.Name))
+	// celery/beat.py: Scheduler.apply_async -
+	// options.setdefault('headers', {})['celery_beat_task'] = True
+	entryHeaders.Set("celery_beat_task", true)
 
 	// --- Task.apply_async: dict(preopts, **options) ----------------------
 	o := opts{}
@@ -331,7 +334,9 @@ func (b *Builder) Build(in Input, taskID string, now time.Time) (*Message, error
 	expires := o.pop("expires")
 	timeLimit := o.pop("time_limit")
 	softTimeLimit := o.pop("soft_time_limit")
-	ignoreResult := false
+	// options.pop('ignore_result', None): None for a task that is not
+	// registered, the task's own setting otherwise
+	var ignoreResult pyjson.Value
 	if v, ok := o.pop("ignore_result").(bool); ok {
 		ignoreResult = v
 	}
@@ -410,22 +415,25 @@ func (b *Builder) Build(in Input, taskID string, now time.Time) (*Message, error
 		if secs < -2147483648 { // AMQP._verify_seconds
 			return nil, fmt.Errorf("%w: expires is out of range", ErrUnsupported)
 		}
-		// maybe_make_aware(app.now() + timedelta(seconds=expires)):
-		// wall-clock addition in app.timezone.
-		w := pytime.InZone(now, b.AppTZ).Add(d)
-		expiresHeader = pyjson.Str(pytime.IsoFormatWall(w, b.AppTZ))
+		// add_seconds_to_datetime(app.now(), expires): elapsed time,
+		// rendered in app.timezone.
+		expiresHeader = pyjson.Str(pytime.IsoFormat(now.Add(d), b.AppTZ))
 	default:
 		return nil, fmt.Errorf("%w: expires=%v", ErrUnsupported, expires)
 	}
 
 	// --- AMQP.as_task_v2 ---------------------------------------------------
+	levels := 3
+	if b.S.TaskReprMaxLevels != nil {
+		levels = *b.S.TaskReprMaxLevels
+	}
 	var argsRepr string
 	if len(args.Items) == 0 {
-		argsRepr = pyjson.SafeRepr(pyjson.EmptyTuple{}, 1024) // `args or ()`
+		argsRepr = pyjson.SafeReprLevels(pyjson.EmptyTuple{}, 1024, levels) // `args or ()`
 	} else {
-		argsRepr = pyjson.SafeRepr(args, 1024)
+		argsRepr = pyjson.SafeReprLevels(args, 1024, levels)
 	}
-	kwargsRepr := pyjson.SafeRepr(kwargs, 1024)
+	kwargsRepr := pyjson.SafeReprLevels(kwargs, 1024, levels)
 
 	h := pyjson.NewDict()
 	h.Set("lang", pyjson.Str("py"))

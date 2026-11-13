@@ -232,7 +232,14 @@ func runEntry(t *testing.T, file string, tzAware bool) {
 			s.ClockedTime = ts(t, r.Sched.ClockedTime)
 		}
 		if err != nil {
-			fail("unexpected schedule error: %v", err)
+			// e.g. the 31st of June: ValueError in crontab.__init__
+			if !strings.HasPrefix(r.Error, "init:") {
+				fail("unexpected schedule error: %v", err)
+			}
+			return
+		}
+		if strings.HasPrefix(r.Error, "init:") {
+			fail("python refused the schedule (%s), Go accepted it", r.Error)
 			return
 		}
 		if r.EffLast != "" && !s.EffectiveLastRun().Equal(ts(t, r.EffLast)) {

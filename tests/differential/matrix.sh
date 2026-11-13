@@ -10,7 +10,7 @@ set -eu
 cd "$(dirname "$0")"
 ROOT="$(cd ../.. && pwd)"
 WORK="${MATRIX_WORKDIR:-$ROOT/tests/integration/.artifacts/matrix}"
-COMBOS="${MATRIX:-5.5.2:2.8.0 5.5.3:2.8.1 5.6.0:2.8.1 5.6.3:2.9.0}"
+COMBOS="${MATRIX:-5.7.0:2.9.0 5.7.0:2.8.1}"
 PY="${PYTHON:-python3}"
 status=0
 for combo in $COMBOS; do

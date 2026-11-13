@@ -13,10 +13,9 @@ Django admin stay exactly as they are; only the beat process changes.
 * **Same behaviour**: schedule maths and message bytes are checked
   against real Celery, case by case (see [Testing](#testing)).
 
-Reference versions: **Celery 5.5.3, kombu 5.5.4, django-celery-beat 2.8.1**.
-Supported: Celery `>=5.5.2,<5.7`, django-celery-beat `2.8.x` and `2.9.x`
-(kombu 5.5 – 5.7, Django 5.2 / 6.0 were exercised). gobeat refuses to
-start on anything else — see [Version support](#version-support).
+Reference versions: **Celery 5.7.0, kombu 5.7.0, django-celery-beat 2.9.0**
+(latest stable). gobeat tracks the latest stable Celery only and refuses
+to start on anything else — see [Version support](#version-support).
 
 Design notes and the source map (which Python file each behaviour was
 copied from) are in [docs/DESIGN.md](docs/DESIGN.md).
@@ -167,34 +166,26 @@ Deliberate:
 
 1. **State is in the database.** Python writes `last_run_at` every three
    minutes; gobeat writes it with every claim.
-2. **No head-of-line blocking.** When a task expires, or a one-off
-   interval task has run, Python beat leaves that entry at the top of its
-   heap and re-checks only it until the next schedule reload — 5 s for a
-   one-off, up to 5 minutes for an expiry — delaying every other task
-   (`celery/beat.py: Scheduler.tick`). gobeat re-keys the entry; other
-   tasks are not delayed. (This is why the soak comparison's task set has
-   no `expires`/one-off-interval tasks.)
-3. **One-off tasks are disabled right after their run**, not at the next
+2. **One-off tasks are disabled right after their run**, not at the next
    evaluation; the resulting row is the same (`enabled=False`,
    `total_run_count=0`).
-4. **No crontab hour window on load.** django-celery-beat 2.8 only loads
+3. **No crontab hour window on load.** django-celery-beat 2.8 only loads
    numeric-hour crontabs within ±2 h of the current hour. A side effect:
    a run missed during downtime is caught up when its hour window opens
    the next day. gobeat catches up at start-up.
-5. **Publish failures are retried** instead of being logged and dropped,
+4. **Publish failures are retried** instead of being logged and dropped,
    and messages are published with publisher confirms and `mandatory`
    (RabbitMQ) — an unroutable message is an error, not a silent drop.
-6. **Refused, never guessed** (an error names the task; it is not
+5. **Refused, never guessed** (an error names the task; it is not
    scheduled): solar schedules; non-JSON serializers; compression other
    than gzip/zlib; `args`/`kwargs`/`headers` that are not a JSON
    array/object or contain kombu `__type__` markers; non-positive
-   intervals; crontabs that never match (February 31st — Python beat
-   crashes); routing that ends on an empty queue name (Python publishes to
-   a queue called `""`); fan-out exchanges on Redis; a UTC crontab with
-   `enable_utc=False` (Python evaluates it in the beat host's local zone).
+   intervals; crontabs that never match (February 31st, a `ValueError`
+   in Celery too); routing that ends on an empty queue name (Python
+   publishes to a queue called `""`); fan-out exchanges on Redis.
    Python beat *disables* a task whose JSON does not parse; gobeat only
    skips it.
-7. **Refused at start-up**: `USE_TZ` ≠ `DJANGO_CELERY_BEAT_TZ_AWARE`,
+6. **Refused at start-up**: `USE_TZ` ≠ `DJANGO_CELERY_BEAT_TZ_AWARE`,
    `enable_utc=False` without `CELERY_TIMEZONE`, `task_always_eager`,
    task protocol 1, several broker URLs, other transports.
 
@@ -213,13 +204,15 @@ Not reproduced (things only a Python process can do):
 * AMQP: content header and body are byte-identical; the `Basic.Publish`
   frame additionally sets `mandatory`.
 
-Inherited from Python on purpose (the reference versions do this):
+Inherited from Celery on purpose (the reference version does this):
 
-* Intervals are added in wall-clock time of `CELERY_TIMEZONE`
-  (`celery.utils.time.remaining`): in a DST zone interval tasks pause for
-  the repeated hour in autumn. Crontabs with day-of-month *and*
-  day-of-week need both to match. A never-run task counts from
-  `date_changed`; with `start_time` it first runs at `start_time`.
+* Crontabs are wall-clock in their own time zone: a time that does not
+  exist on the spring-forward day runs an hour later, a repeated time
+  runs once, and an every-minute crontab in a DST zone skips the repeated
+  hour in autumn. Intervals are elapsed time and are not affected by DST.
+* A crontab with day-of-month *and* day-of-week needs both to match.
+* A never-run task counts from `date_changed`; with `start_time` it first
+  runs at `start_time`.
 
 ## Version support
 
@@ -228,10 +221,14 @@ django-celery-beat migrations before doing anything.
 
 | | status |
 |---|---|
-| Celery 5.5.2 – 5.6.x, django-celery-beat 2.8.x – 2.9.x | supported: every golden file regenerated under 5.5.2+2.8.0, 5.5.3+2.8.1, 5.6.0+2.8.1, 5.6.2/5.6.3+2.9.0 is byte-identical |
-| Celery 5.5.0, 5.5.1 | refused: crontab times around DST differ |
-| Celery 5.7.0 | refused: crontab/DST arithmetic, `saferepr` and beat itself changed; needs a re-port (not done yet) |
-| Celery ≤ 5.4, django-celery-beat ≤ 2.7 | refused: different first-run reference time and crontab arithmetic |
+| Celery 5.7.x | supported (reference: 5.7.0) |
+| django-celery-beat 2.8.x, 2.9.x | supported: goldens regenerated with 2.8.1 and 2.9.0 are byte-identical |
+| Celery ≤ 5.6 | refused: crontab arithmetic around DST, interval arithmetic, `saferepr`, the message headers and beat's tick differ from 5.7 |
+| django-celery-beat ≤ 2.7 | refused: a never-run task starts from "now" instead of `date_changed` |
+
+When a new Celery release appears: bump `tests/requirements.txt`, run
+`make golden soak-golden` and `make ci`; every behavioural change shows up
+as a failing golden case.
 
 ## Testing
 

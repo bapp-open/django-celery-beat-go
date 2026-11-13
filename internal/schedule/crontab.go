@@ -2,6 +2,8 @@ package schedule
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -24,6 +26,9 @@ type Crontab struct {
 	TZ *time.Location
 }
 
+// cronDaysInMonth is celery/schedules.py: CRON_DAYS_IN_MONTH.
+var cronDaysInMonth = [13]int{0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+
 // NewCrontab parses the five fields exactly as crontab.__init__ does.
 func NewCrontab(minute, hour, dayOfWeek, dayOfMonth, monthOfYear string, tz *time.Location) (*Crontab, error) {
 	c := &Crontab{TZ: tz, allDomMoy: dayOfMonth == "*" && monthOfYear == "*"}
@@ -42,6 +47,14 @@ func NewCrontab(minute, hour, dayOfWeek, dayOfMonth, monthOfYear string, tz *tim
 	}
 	if c.MonthOfYear, err = ParseField(monthOfYear, 12, 1); err != nil {
 		return nil, err
+	}
+	// crontab.__init__: "day_of_month ... never occurs in month_of_year"
+	possible := false
+	for _, m := range c.MonthOfYear {
+		possible = possible || c.DayOfMonth[0] <= cronDaysInMonth[m]
+	}
+	if !possible {
+		return nil, fmt.Errorf("%w: day_of_month %q never occurs in month_of_year %q", ErrValue, dayOfMonth, monthOfYear)
 	}
 	return c, nil
 }
@@ -110,11 +123,9 @@ func (f ffwd) apply(o pytime.Wall) pytime.Wall {
 // reading of last_run_at in lastTZ (normally c.TZ; ModelEntry's
 // start_time path passes app.timezone), now is the current instant.
 func (c *Crontab) remainingDelta(last pytime.Wall, lastTZ *time.Location, now time.Time) (ffwd, error) {
-	nw := pytime.InZone(now, c.TZ)
 	dowNum := last.IsoWeekdayMod7()
 	executeThisDate := has(c.MonthOfYear, last.Month) && has(c.DayOfMonth, last.Day) && has(c.DayOfWeek, dowNum)
 	executeThisHour := executeThisDate &&
-		last.Day == nw.Day && last.Month == nw.Month && last.Year == nw.Year &&
 		has(c.Hour, last.Hour) && last.Minute < c.Minute[len(c.Minute)-1]
 
 	if executeThisHour {
@@ -267,30 +278,17 @@ func (c *Crontab) IsDuePlain(last, now time.Time, deadline *float64) (bool, floa
 	rem := nonNeg(remDelta)
 	due := remDelta <= 0
 	passed := false
-	if deadline != nil {
-		checked := lw
-		remSecs := pytime.TotalSeconds(remDelta)
-		lastFeasible := remSecs
-		for guard := 0; remSecs < 0; guard++ {
-			if guard > 50_000_000 {
-				return false, 0, ErrRollover
-			}
-			abs := remDelta
-			if abs < 0 {
-				abs = -abs
-			}
-			checked = checked.Add(abs) // aware + timedelta: wall arithmetic
-			if remDelta, err = c.remainingWall(checked, c.TZ, now); err != nil {
-				return false, 0, err
-			}
-			remSecs = pytime.TotalSeconds(remDelta)
-			if remSecs < 0 {
-				lastFeasible = remSecs
-			}
+	if deadline != nil && remDelta < 0 {
+		// "deadline_since = now - deadline - 1µs": if the next run after
+		// that instant is still in the future, every missed run is
+		// older than the deadline.
+		since := now.Add(-time.Duration(math.Round(*deadline*1e6))*time.Microsecond - time.Microsecond)
+		r, err := c.Remaining(since, now)
+		if err != nil {
+			return false, 0, err
 		}
-		passed = -lastFeasible > *deadline
-		if passed {
-			due = false
+		if r > 0 {
+			passed, due = true, false
 		}
 	}
 	if due || passed {

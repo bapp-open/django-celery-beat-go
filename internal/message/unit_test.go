@@ -43,8 +43,8 @@ func TestBuildDefaultMessage(t *testing.T) {
 		`"content-encoding": "utf-8", "content-type": "application/json", "headers": {"lang": "py", "task": "app.add", "id": "the-id", ` +
 		`"shadow": null, "eta": null, "expires": "2024-01-02T03:04:35+00:00", "group": null, "group_index": null, "retries": 0, ` +
 		`"timelimit": [null, null], "root_id": "the-id", "parent_id": null, "argsrepr": "[1, 2]", "kwargsrepr": "{'x': None}", ` +
-		`"origin": "gen1@host", "ignore_result": false, "replaced_task_nesting": 0, "stamped_headers": null, "stamps": {}, ` +
-		`"periodic_task_name": "nightly"}, "properties": {"correlation_id": "the-id", "reply_to": "reply-id", "delivery_mode": 2, ` +
+		`"origin": "gen1@host", "ignore_result": null, "replaced_task_nesting": 0, "stamped_headers": null, "stamps": {}, ` +
+		`"periodic_task_name": "nightly", "celery_beat_task": true}, "properties": {"correlation_id": "the-id", "reply_to": "reply-id", "delivery_mode": 2, ` +
 		`"expiration": "30000", "delivery_info": {"exchange": "", "routing_key": "celery"}, "priority": 0, ` +
 		`"body_encoding": "base64", "delivery_tag": "tag"}}`
 	if got := string(m.RedisPayload("tag")); got != want {

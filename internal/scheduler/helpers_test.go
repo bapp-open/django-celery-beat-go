@@ -22,7 +22,7 @@ import (
 
 const settingsJSON = `{
  "schema": 1,
- "versions": {"celery": "5.5.3", "kombu": "5.5.4", "django_celery_beat": "2.8.1"},
+ "versions": {"celery": "5.7.0", "kombu": "5.7.0", "django_celery_beat": "2.9.0"},
  "broker_url": "memory://", "broker_transport_options": {},
  "timezone": %q, "enable_utc": true, "use_tz": true, "tz_aware": true,
  "beat_max_loop_interval": 5, "beat_cron_starting_deadline": null,

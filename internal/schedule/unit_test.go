@@ -142,15 +142,12 @@ func TestEntrySideEffectsAndRefusals(t *testing.T) {
 	if r, _ := s.IsDue(env, now); r.Action != ActDisableOneOff || r.Due {
 		t.Errorf("one-off done: %+v", r)
 	}
-	cron, _ := NewCrontab("0", "4", "*", "*", "*", time.UTC)
-	s = Spec{Kind: KindCrontab, Cron: cron, Enabled: true, DateChanged: now}
-	if _, err := s.IsDue(&Env{AppTZ: time.UTC, TZAware: true, EnableUTC: false}, now); !errors.Is(err, ErrUnsupported) {
-		t.Errorf("enable_utc=False with a UTC crontab must be refused, got %v", err)
-	}
-	feb31, _ := NewCrontab("0", "0", "*", "31", "2", time.UTC)
-	s = Spec{Kind: KindCrontab, Cron: feb31, Enabled: true, DateChanged: now}
-	if _, err := s.IsDue(env, now); !errors.Is(err, ErrRollover) {
+	// crontab.__init__ (Celery 5.7): a day that never occurs is a ValueError
+	if _, err := NewCrontab("0", "0", "*", "31", "2", time.UTC); !errors.Is(err, ErrValue) {
 		t.Errorf("February 31st: %v", err)
+	}
+	if _, err := NewCrontab("0", "0", "*", "29", "2", time.UTC); err != nil {
+		t.Errorf("February 29th exists: %v", err)
 	}
 	for _, bad := range []struct {
 		every  int64

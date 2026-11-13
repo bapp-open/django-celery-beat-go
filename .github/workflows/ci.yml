@@ -45,11 +45,10 @@ jobs:
       fail-fast: false
       matrix:
         broker: [redis, amqp]
-        celery: ["5.5.3"]
-        dcb: ["2.8.1"]
+        celery: ["5.7.0"]
+        dcb: ["2.9.0"]
         include:
-          - {broker: redis, celery: "5.6.3", dcb: "2.9.0"}
-          - {broker: amqp, celery: "5.6.3", dcb: "2.9.0"}
+          - {broker: redis, celery: "5.7.0", dcb: "2.8.1"}
     env:
       BROKER: ${{ matrix.broker }}
       CELERY_VERSION: ${{ matrix.celery }}

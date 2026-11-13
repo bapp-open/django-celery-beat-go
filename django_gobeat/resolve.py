@@ -315,6 +315,7 @@ def build_settings(app, extra_task_names=(), include_broker_url=True):
         'task_create_missing_queues': bool(conf.task_create_missing_queues),
         'task_queue_max_priority': conf.task_queue_max_priority,
         'task_protocol': conf.task_protocol,
+        'task_repr_maxlevels': conf.get('task_repr_maxlevels', 3),
         'task_always_eager': bool(conf.task_always_eager),
         'task_send_sent_event': bool(conf.task_send_sent_event),
         'has_routes': bool(router.routes),

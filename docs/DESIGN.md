@@ -6,9 +6,9 @@ untouched. The Python implementation is the specification; every behaviour
 copied from it cites the file it came from (see "Source map" below and the
 comments in the Go code).
 
-Pinned reference versions: **celery 5.5.3, kombu 5.5.4, django-celery-beat
-2.8.1** (other supported versions are verified by regenerating the golden
-files against them, see `tests/differential`).
+Pinned reference versions: **celery 5.7.0, kombu 5.7.0, django-celery-beat
+2.9.0** - the latest stable Celery is the only supported one; the golden
+files are regenerated whenever the pin moves (`tests/differential`).
 
 ## Components
 
@@ -68,12 +68,10 @@ Deliberate differences from the Python loop (all listed in the README):
    crash may be delivered twice with the *same* task id (at-least-once).
 3. **Deterministic task id**: UUIDv5(namespace, "<periodic task id>:<scheduled
    time in µs>") where scheduled time is the instant the run became due.
-4. **No head-of-line blocking**: an entry that is not due at its `nextCheck`
-   is simply re-keyed; it cannot starve other entries.
-5. **No crontab hour-window / clocked look-ahead filter** on load
+4. **No crontab hour-window / clocked look-ahead filter** on load
    (`DatabaseScheduler.enabled_models_qs`); those are load optimisations in
    Python with a side effect on catch-up timing that we do not copy.
-6. **Missed-run policy** is explicit: `catch_up_once` (default, what Python
+5. **Missed-run policy** is explicit: `catch_up_once` (default, what Python
    does: one run, then schedule from now) or `skip` (advance `last_run_at`
    without publishing when a run is later than `GOBEAT_MISSED_RUN_GRACE`).
 
@@ -88,10 +86,10 @@ defence.
 ## Time
 
 `clock.Clock` is injected everywhere; scheduling code never calls
-`time.Now()`. Wall-clock arithmetic follows Python's `datetime` semantics
+`time.Now()`. Crontab arithmetic follows Python's `datetime` semantics
 (naive field arithmetic, then conversion with `fold=0`, PEP 495) because
-`celery.utils.time.remaining` and `ffwd.__radd__` rely on it; this is what
-decides DST gap/overlap behaviour. `internal/pytime` implements it on top
+`ffwd.__radd__` relies on it; this is what decides DST gap/overlap
+behaviour. Intervals are elapsed time (`add_seconds_to_datetime`). `internal/pytime` implements it on top
 of `time.Time.ZoneBounds`.
 
 ## Messages
@@ -106,8 +104,7 @@ on the wire is not observable by consumers).
 
 Unsupported inputs are never guessed: solar schedules, non-JSON
 serializers, unknown compression, kombu typed-JSON markers, fan-out
-exchanges on Redis, `enable_utc=False` with a UTC crontab, etc. log an error
-naming the task and skip it.
+exchanges on Redis, etc. log an error naming the task and skip it.
 
 ## Testing strategy
 

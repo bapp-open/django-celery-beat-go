@@ -95,10 +95,12 @@ type Settings struct {
 	TaskCreateMissingQueues bool    `json:"task_create_missing_queues"`
 	TaskQueueMaxPriority    any     `json:"task_queue_max_priority"`
 	TaskProtocol            int     `json:"task_protocol"`
-	TaskAlwaysEager         bool    `json:"task_always_eager"`
-	TaskSendSentEvent       bool    `json:"task_send_sent_event"`
-	HasRoutes               bool    `json:"has_routes"`
-	DynamicRoutes           bool    `json:"dynamic_routes"`
+	// TaskReprMaxLevels is app.conf.task_repr_maxlevels (nil: 3).
+	TaskReprMaxLevels *int `json:"task_repr_maxlevels"`
+	TaskAlwaysEager   bool `json:"task_always_eager"`
+	TaskSendSentEvent bool `json:"task_send_sent_event"`
+	HasRoutes         bool `json:"has_routes"`
+	DynamicRoutes     bool `json:"dynamic_routes"`
 
 	Queues   map[string]*Queue `json:"queues"`
 	Tasks    map[string]*Task  `json:"tasks"`

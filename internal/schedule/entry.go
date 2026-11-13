@@ -145,12 +145,22 @@ func (s *Spec) IsDue(env *Env, now time.Time) (Result, error) {
 			// start time expressed in app.timezone, and the final
 			// subtraction is between two datetimes sharing that tzinfo,
 			// i.e. a wall-clock difference.
-			sw := pytime.InZone(*s.StartTime, env.AppTZ)
-			d, err := s.Cron.remainingDelta(sw, env.AppTZ, now)
+			// CrontabSchedule.due_start_time: start + ffwd in the
+			// crontab's zone. The final subtraction is between two
+			// aware datetimes: a wall-clock difference when they share
+			// the tzinfo object (crontab zone == app.timezone), a real
+			// one otherwise.
+			sw := pytime.InZone(*s.StartTime, s.Cron.TZ)
+			d, err := s.Cron.remainingDelta(sw, s.Cron.TZ, now)
 			if err != nil {
 				return Result{}, err
 			}
-			remaining = d.apply(sw).Sub(pytime.InZone(now, env.AppTZ))
+			end := d.apply(sw)
+			if s.Cron.TZ.String() == env.AppTZ.String() {
+				remaining = end.Sub(pytime.InZone(now, env.AppTZ))
+			} else {
+				remaining = end.UTC(s.Cron.TZ).Sub(now)
+			}
 		} else {
 			remaining = s.StartTime.Sub(now)
 		}
@@ -166,8 +176,8 @@ func (s *Spec) IsDue(env *Env, now time.Time) (Result, error) {
 	switch s.Kind {
 	case KindInterval:
 		// celery/schedules.py: schedule.is_due -> remaining(last, run_every,
-		// now): wall-clock addition in app.timezone.
-		end := pytime.InZone(last, env.AppTZ).Add(s.Every).UTC(env.AppTZ)
+		// now) -> add_seconds_to_datetime: elapsed (real) time.
+		end := last.Add(s.Every)
 		if rem := end.Sub(now); rem > 0 {
 			return Result{Next: pytime.TotalSeconds(rem)}, nil
 		}
@@ -179,13 +189,6 @@ func (s *Spec) IsDue(env *Env, now time.Time) (Result, error) {
 		}
 		return Result{Due: true, DueAt: s.ClockedTime, Next: NeverCheck}, nil
 	case KindCrontab:
-		if !env.EnableUTC && s.Cron.TZ.String() == "UTC" {
-			// celery/schedules.py: BaseSchedule.to_local converts UTC
-			// datetimes to the *process* local zone when enable_utc is
-			// off; that depends on the beat host's TZ and is not
-			// reproducible here.
-			return Result{}, fmt.Errorf("%w: enable_utc=False with a UTC crontab is evaluated in the beat process's local time by Python", ErrUnsupported)
-		}
 		var (
 			due  bool
 			next float64

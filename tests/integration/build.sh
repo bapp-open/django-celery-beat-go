@@ -4,8 +4,8 @@
 # Behind a TLS-intercepting proxy set BUILD_CA_FILE (and HTTPS_PROXY).
 set -eu
 cd "$(dirname "$0")/../.."
-CELERY_VERSION="${CELERY_VERSION:-5.5.3}"
-DCB_VERSION="${DCB_VERSION:-2.8.1}"
+CELERY_VERSION="${CELERY_VERSION:-5.7.0}"
+DCB_VERSION="${DCB_VERSION:-2.9.0}"
 set --
 if [ -n "${BUILD_CA_FILE:-}" ]; then
     set -- --network host --secret "id=ca,src=${BUILD_CA_FILE}" \
