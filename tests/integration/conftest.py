@@ -156,15 +156,21 @@ def assert_exactly_once(name, settle=4):
         return j and all(r['published_at'] for r in j)
     wait_for(done, timeout=60, what='journal of %s fully published' % name)
     time.sleep(settle)
-    j = journal(name)
+    # The task may still be running: read executions first, then the
+    # journal, so that every execution seen must already be journaled; and
+    # only require an execution for runs claimed a few seconds ago.
+    read_at = time.time()
     r = runs(name)
+    j = journal(name)
     ids = [x['task_id'] for x in r]
     assert len(ids) == len(set(ids)), 'duplicate executions: %r' % sorted(
         i for i in set(ids) if ids.count(i) > 1)
-    assert set(ids) == {x['task_id'] for x in j}, (
-        'journal and executions differ: only journal %r, only runs %r' % (
-            sorted({x['task_id'] for x in j} - set(ids)),
-            sorted(set(ids) - {x['task_id'] for x in j})))
+    journaled = {x['task_id'] for x in j}
+    assert set(ids) <= journaled, (
+        'executed but never journaled: %r' % sorted(set(ids) - journaled))
+    lost = [x for x in j if x['task_id'] not in set(ids)
+            and x['claimed_ts'] < read_at - 3]
+    assert not lost, 'journaled (published) but never executed: %r' % lost
     return j, r
 
 

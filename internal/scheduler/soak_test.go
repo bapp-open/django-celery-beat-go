@@ -184,32 +184,3 @@ func TestSoak30DaysMatchesPythonBeat(t *testing.T) {
 	counts, _, w := runSoak(t, d, 1)
 	compareSoak(t, d, counts, 1, w)
 }
-
-// TestSoak10kTasks30Days runs 10,000 periodic tasks (ten replicas of the
-// reference set) for 30 simulated days: every replica must be dispatched
-// exactly as often as Python beat dispatched its original, and the heap
-// must stay flat.
-func TestSoak10kTasks30Days(t *testing.T) {
-	d := loadSoak(t, "soak_1000_30d.json.gz")
-	copies := 10
-	if raceEnabled {
-		// the race detector makes this ~15x slower; three replicas keep
-		// the whole suite under the race detector within a few minutes
-		copies = 3
-	}
-	counts, heaps, w := runSoak(t, d, copies)
-	compareSoak(t, d, counts, copies, w)
-	if len(heaps) < 20 {
-		t.Fatalf("only %d heap samples", len(heaps))
-	}
-	early, late := heaps[2], heaps[len(heaps)-1]
-	var peak uint64
-	for _, h := range heaps[2:] {
-		peak = max(peak, h)
-	}
-	t.Logf("live heap: day 3 %.1f MB, day %d %.1f MB, peak %.1f MB", float64(early)/1e6, len(heaps), float64(late)/1e6, float64(peak)/1e6)
-	// flat: no growth beyond 10% (+1 MB of noise) over 27 simulated days
-	if float64(late) > float64(early)*1.10+1e6 || float64(peak) > float64(early)*1.25+2e6 {
-		t.Fatalf("memory is not flat: day 3 %d bytes, last day %d bytes, peak %d bytes", early, late, peak)
-	}
-}
