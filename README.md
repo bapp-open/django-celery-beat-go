@@ -292,7 +292,7 @@ as a failing golden case.
 | unit | `make test` | schedule maths, crontab parsing, time zones, message encoding, config, HTTP, shadow tool — with `-race` and a goroutine-leak check in every package |
 | differential | `make test` (replay), `make golden` (regenerate) | 70,000 schedule cases, 6,000 JSON/repr cases and 6,000 messages produced by real Celery/kombu/django-celery-beat (`tests/differential`); messages are captured from real Redis and RabbitMQ publishes |
 | fuzz | `make fuzz` | crontab parser, crontab evaluation, JSON loader, message encoder |
-| soak | `make test`, `make soak-golden` | real `DatabaseScheduler.tick()` on a fake clock vs gobeat's simulation: identical dispatch counts per task; 10,000 tasks × 30 days with a flat heap |
+| soak | `make test`, `make soak-golden` | real `DatabaseScheduler.tick()` on a fake clock vs gobeat's simulation over 30 simulated days: identical dispatch counts for every task (1,000 tasks, 1.24 M dispatches; and 10,000 tasks, 12.4 M dispatches, with a flat heap) |
 | version matrix | `make matrix` | goldens regenerated under each supported version must be byte-identical |
 | Django app | `make pytest` | `cron.py` discovery, `CronInterface`, job sync |
 | integration | `make integration` | docker compose: Postgres, Redis, RabbitMQ, a Django project, real workers — on both brokers, plus a pass with django-celery-beat not installed |
