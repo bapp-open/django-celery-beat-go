@@ -274,7 +274,6 @@ type run struct {
 
 	lastMarker *time.Time
 	lastFull   time.Time
-	lastPoll   time.Time
 	lastPrune  time.Time
 	needReload bool
 }
@@ -451,7 +450,6 @@ func (r *run) recover(ctx context.Context) error {
 
 func (r *run) loop(ctx context.Context) error {
 	o := &r.s.o
-	notified := false
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -461,14 +459,14 @@ func (r *run) loop(ctx context.Context) error {
 		o.Metrics.Set("gobeat_last_tick_timestamp_seconds", float64(now.UnixMicro())/1e6)
 
 		// DatabaseScheduler.schedule: reload when the marker moved or
-		// after SCHEDULE_SYNC_MAX_INTERVAL. Python polls the marker on
-		// every tick, i.e. at least every max_interval.
-		if notified || now.Sub(r.lastPoll) >= r.maxLoop || now.Before(r.lastPoll) {
+		// after SCHEDULE_SYNC_MAX_INTERVAL. Like Python, the marker is
+		// polled on every tick (LISTEN/NOTIFY only makes the tick happen
+		// sooner), i.e. at least every max_interval.
+		{
 			st, err := r.st.State(ctx)
 			if err != nil {
 				return err
 			}
-			r.lastPoll = now
 			if st.SettingsVersion == "" {
 				o.Log.Error("the gobeat settings row disappeared; keeping the last known settings")
 			} else if st.SettingsVersion != r.version {
@@ -526,11 +524,11 @@ func (r *run) loop(ctx context.Context) error {
 			}
 		}
 		if wait <= 0 {
-			notified = false
 			continue
 		}
-		var err error
-		if notified, err = r.st.Wait(ctx, wait); err != nil {
+		// A NOTIFY from the django_gobeat triggers ends the wait early;
+		// the next iteration polls the marker either way.
+		if _, err := r.st.Wait(ctx, wait); err != nil {
 			return err
 		}
 	}
@@ -645,7 +643,7 @@ func (r *run) reload(ctx context.Context, reason string) error {
 		return err
 	}
 	now := o.Clock.Now()
-	r.lastMarker, r.lastFull, r.lastPoll = st.Marker, now, now
+	r.lastMarker, r.lastFull = st.Marker, now
 	o.Metrics.Add("gobeat_reloads_total", 1, "reason", reason)
 
 	if r.s.cache == nil || r.s.cacheVer != r.version {
@@ -722,8 +720,9 @@ func seconds(s float64) time.Duration {
 	if s <= 0 {
 		return 0
 	}
-	// round up to a microsecond so we never wake before the instant
-	return time.Duration(math.Ceil(s*1e6)) * time.Microsecond
+	// Python's values are whole microseconds (timedelta.total_seconds());
+	// rounding recovers them exactly from the float.
+	return time.Duration(math.Round(s*1e6)) * time.Microsecond
 }
 
 func (r *run) setNext(e *entry, t time.Time) {

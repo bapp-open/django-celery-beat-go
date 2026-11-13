@@ -78,21 +78,28 @@ type Diff struct {
 }
 
 // Compare pairs events of the same task whose times differ by at most
-// tolerance. Events outside [from, to] are ignored (start-up and shutdown
-// edges, where one side was not yet running).
+// tolerance. Everything is paired first; unpaired events outside
+// [from, to] are then ignored (start-up and shutdown edges, where one side
+// was not running yet or any more).
 func Compare(py, gb []Event, tolerance time.Duration, from, to time.Time) Diff {
 	group := func(evs []Event) map[string][]time.Time {
 		g := map[string][]time.Time{}
 		for _, e := range evs {
-			if (!from.IsZero() && e.At.Before(from)) || (!to.IsZero() && e.At.After(to)) {
-				continue
-			}
 			g[e.Name] = append(g[e.Name], e.At)
 		}
 		for _, ts := range g {
 			sort.Slice(ts, func(i, j int) bool { return ts[i].Before(ts[j]) })
 		}
 		return g
+	}
+	inside := func(e []Event) []Event {
+		out := e[:0]
+		for _, x := range e {
+			if (from.IsZero() || !x.At.Before(from)) && (to.IsZero() || !x.At.After(to)) {
+				out = append(out, x)
+			}
+		}
+		return out
 	}
 	p, g := group(py), group(gb)
 	names := map[string]bool{}
@@ -142,6 +149,7 @@ func Compare(py, gb []Event, tolerance time.Duration, from, to time.Time) Diff {
 			return e[i].Name < e[j].Name
 		})
 	}
+	d.OnlyPython, d.OnlyGobeat = inside(d.OnlyPython), inside(d.OnlyGobeat)
 	byTime(d.OnlyPython)
 	byTime(d.OnlyGobeat)
 	return d
@@ -212,7 +220,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	if ghi.Before(to) {
 		to = ghi
 	}
-	from, to = from.Add(*trim), to.Add(-*trim)
+	// an event within the tolerance of either end may have its partner
+	// just outside the overlap
+	from, to = from.Add(*trim+*tol), to.Add(-*trim-*tol)
 	d := Compare(py, gb, *tol, from, to)
 	fmt.Fprintf(stdout, "compared %s .. %s (tolerance %s)\n", from.Format(time.RFC3339), to.Format(time.RFC3339), *tol)
 	fmt.Fprintf(stdout, "matched: %d   max skew: %s   only python: %d   only gobeat: %d\n",
