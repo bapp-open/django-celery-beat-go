@@ -15,7 +15,7 @@ class GobeatSettingsAdmin(admin.ModelAdmin):
 @admin.register(Dispatch)
 class DispatchAdmin(admin.ModelAdmin):
     list_display = ('name', 'task', 'scheduled_for', 'claimed_at',
-                    'published_at', 'attempts')
+                    'published_at', 'abandoned_at', 'attempts')
     list_filter = ('published_at',)
     search_fields = ('name', 'task', 'task_id')
     readonly_fields = [f.name for f in Dispatch._meta.fields]

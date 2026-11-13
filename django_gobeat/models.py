@@ -41,6 +41,9 @@ class Dispatch(models.Model):
     scheduled_for = models.DateTimeField()
     claimed_at = models.DateTimeField()
     published_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    #: Set when gobeat gave up (GOBEAT_PUBLISH_MAX_AGE exceeded or the
+    #: message expired); never silently: it is logged and counted.
+    abandoned_at = models.DateTimeField(null=True, blank=True)
     attempts = models.IntegerField(default=0)
     last_error = models.TextField(blank=True, default='')
     #: Rendered message (destination, headers, properties, body).

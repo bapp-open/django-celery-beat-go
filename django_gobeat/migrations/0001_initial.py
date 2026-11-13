@@ -71,6 +71,7 @@ class Migration(migrations.Migration):
                 ('scheduled_for', models.DateTimeField()),
                 ('claimed_at', models.DateTimeField()),
                 ('published_at', models.DateTimeField(blank=True, db_index=True, null=True)),
+                ('abandoned_at', models.DateTimeField(blank=True, null=True)),
                 ('attempts', models.IntegerField(default=0)),
                 ('last_error', models.TextField(blank=True, default='')),
                 ('message', models.JSONField()),

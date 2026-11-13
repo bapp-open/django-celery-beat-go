@@ -76,6 +76,8 @@ type Spec struct {
 
 // Result of IsDue.
 type Result struct {
+	// DueAt is the instant the run became due (only set when Due).
+	DueAt  time.Time
 	Due    bool
 	Next   float64 // seconds until the next check, as returned by Python
 	Action Action
@@ -169,13 +171,13 @@ func (s *Spec) IsDue(env *Env, now time.Time) (Result, error) {
 		if rem := end.Sub(now); rem > 0 {
 			return Result{Next: pytime.TotalSeconds(rem)}, nil
 		}
-		return Result{Due: true, Next: pytime.TotalSeconds(s.Every)}, nil
+		return Result{Due: true, DueAt: end, Next: pytime.TotalSeconds(s.Every)}, nil
 	case KindClocked:
 		// django_celery_beat/clockedschedule.py: clocked.is_due
 		if rem := s.ClockedTime.Sub(now); rem > 0 {
 			return Result{Next: pytime.TotalSeconds(rem)}, nil
 		}
-		return Result{Due: true, Next: NeverCheck}, nil
+		return Result{Due: true, DueAt: s.ClockedTime, Next: NeverCheck}, nil
 	case KindCrontab:
 		if !env.EnableUTC && s.Cron.TZ.String() == "UTC" {
 			// celery/schedules.py: BaseSchedule.to_local converts UTC
@@ -197,7 +199,13 @@ func (s *Spec) IsDue(env *Env, now time.Time) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		return Result{Due: due, Next: next}, nil
+		r := Result{Due: due, Next: next}
+		if due {
+			// the first matching minute after last_run_at
+			rem, _ := s.Cron.Remaining(last, now)
+			r.DueAt = now.Add(rem)
+		}
+		return r, nil
 	}
 	return Result{}, fmt.Errorf("%w: no schedule", ErrUnsupported)
 }
