@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1
+# Django project + Celery worker/beat used by the integration tests.
+FROM python:3.12-slim
+ARG CELERY_VERSION=5.5.3
+ARG DCB_VERSION=2.8.1
+ARG DJANGO_VERSION=5.2.*
+ENV PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore
+# An optional CA bundle (build secret "ca") supports building behind a
+# TLS-intercepting proxy; it is not needed otherwise.
+RUN --mount=type=secret,id=ca,target=/tmp/ca.crt,required=false \
+    if [ -s /tmp/ca.crt ]; then export PIP_CERT=/tmp/ca.crt; fi; \
+    pip install --no-cache-dir "celery[redis]==${CELERY_VERSION}" \
+        "django-celery-beat==${DCB_VERSION}" "Django==${DJANGO_VERSION}" \
+        "psycopg[binary]>=3.1"
+WORKDIR /srv
+COPY django_gobeat /srv/django_gobeat
+COPY tests/integration/project /srv

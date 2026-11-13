@@ -66,6 +66,9 @@ type Options struct {
 	// Pause waits between failed sessions (database down). The default
 	// sleeps on the real clock; simulations advance their fake clock.
 	Pause func(ctx context.Context, d time.Duration)
+	// Fault is a test hook called at named points of a dispatch
+	// ("after_claim", "after_publish"); nil in production.
+	Fault func(point string)
 	// Beat is called on every loop iteration (health).
 	Beat func(state string)
 }
@@ -120,6 +123,9 @@ func New(o Options) *Scheduler {
 			case <-t.C:
 			}
 		}
+	}
+	if o.Fault == nil {
+		o.Fault = func(string) {}
 	}
 	if o.Beat == nil {
 		o.Beat = func(string) {}
@@ -820,6 +826,7 @@ func (r *run) process(ctx context.Context, e *entry, now time.Time) error {
 		o.Metrics.ObserveLateness(lateness.Seconds())
 	}
 	logDispatch("dispatch")
+	o.Fault("after_claim")
 	r.advance(e, now, true)
 	item := &pendingItem{journalID: journalID, name: e.row.Name, taskID: taskID, claimedAt: now, msg: msg}
 	if len(r.pending) > 0 || now.Before(r.brokerDown) {
@@ -868,6 +875,7 @@ func (r *run) publish(ctx context.Context, it *pendingItem, now time.Time) error
 	if err == nil {
 		r.brokerFail = 0
 		o.Metrics.Add("gobeat_dispatch_total", 1, "result", "published")
+		o.Fault("after_publish")
 		return r.st.MarkPublished(ctx, it.journalID, o.Clock.Now())
 	}
 	it.attempts++

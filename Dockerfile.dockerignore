@@ -1,0 +1,6 @@
+.git
+bin
+testdata
+tests
+docs
+django_gobeat

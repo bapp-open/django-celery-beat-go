@@ -108,6 +108,7 @@ func run() int {
 		ReplyTo:                  scheduler.NewReplyTo(),
 		AllowUnsupportedVersions: env.AllowUnsupportedVersions,
 		Beat:                     health.Beat,
+		Fault:                    faultHook(log),
 	})
 	log.Info("gobeat starting", "version", version, "dry_run", env.DryRun, "http", env.HTTPAddr)
 
@@ -156,4 +157,28 @@ func healthcheck() int {
 		return 1
 	}
 	return 0
+}
+
+// faultHook implements GOBEAT_FAULT_INJECT ("after_claim=3s,after_publish=3s"),
+// used only by the failure-injection tests to hold the process inside a
+// dispatch so that it can be killed there. Unset in production.
+func faultHook(log *slog.Logger) func(string) {
+	spec := os.Getenv("GOBEAT_FAULT_INJECT")
+	if spec == "" {
+		return nil
+	}
+	pauses := map[string]time.Duration{}
+	for _, part := range strings.Split(spec, ",") {
+		k, v, _ := strings.Cut(part, "=")
+		if d, err := time.ParseDuration(v); err == nil {
+			pauses[strings.TrimSpace(k)] = d
+		}
+	}
+	log.Warn("FAULT INJECTION ENABLED - test builds only", "spec", spec)
+	return func(point string) {
+		if d := pauses[point]; d > 0 {
+			log.Warn("fault injection: pausing", "point", point, "for", d.String())
+			time.Sleep(d)
+		}
+	}
 }

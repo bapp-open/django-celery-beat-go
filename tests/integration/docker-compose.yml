@@ -1,0 +1,121 @@
+# Integration environment: Postgres, Redis, RabbitMQ, a real Django
+# project with Celery workers, gobeat, and (profile "shadow") Python beat.
+#
+#   BROKER=redis|amqp  USE_TZ=1|0  docker compose up -d --build
+name: gobeat-it
+
+x-django: &django
+  build:
+    context: ../..
+    dockerfile: tests/integration/Dockerfile.django
+    network: ${BUILD_NETWORK:-default}
+    args:
+      CELERY_VERSION: ${CELERY_VERSION:-5.5.3}
+      DCB_VERSION: ${DCB_VERSION:-2.8.1}
+      HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-}
+    secrets: [ca]
+  image: gobeat-it-django:${CELERY_VERSION:-5.5.3}-${DCB_VERSION:-2.8.1}
+  environment: &django-env
+    BROKER_URL: ${BROKER_URL:-redis://redis:6379/0}
+    USE_TZ: ${USE_TZ:-1}
+    TIME_ZONE: ${TIME_ZONE:-Europe/Bucharest}
+    PGHOST: postgres
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+    rabbitmq: {condition: service_healthy}
+
+x-gobeat: &gobeat
+  build:
+    context: ../..
+  image: gobeat:it
+  environment: &gobeat-env
+    DATABASE_URL: postgres://app:app@postgres:5432/app
+    GOBEAT_LOG_LEVEL: debug
+    GOBEAT_FAULT_INJECT: ${GOBEAT_FAULT_INJECT:-}
+    GOBEAT_MISSED_RUN_POLICY: ${GOBEAT_MISSED_RUN_POLICY:-catch_up_once}
+    GOBEAT_PUBLISH_TIMEOUT: 3s
+    GOBEAT_STANDBY_INTERVAL: 1s
+  restart: "no"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: app, POSTGRES_PASSWORD: app, POSTGRES_DB: app}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  rabbitmq:
+    image: rabbitmq:3.13-alpine
+    healthcheck:
+      # a plain port probe: rabbitmq-diagnostics run as root this early
+      # races the server for the Erlang cookie file
+      test: ["CMD", "nc", "-z", "127.0.0.1", "5672"]
+      interval: 2s
+      timeout: 10s
+      retries: 40
+
+  # migrate + gobeat_sync, then stay up as the "admin" the tests drive
+  ctl:
+    <<: *django
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py gobeat_sync &&
+             touch /tmp/ready && sleep infinity"
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 1s
+      timeout: 3s
+      retries: 120
+    stop_grace_period: 1s
+
+  worker:
+    <<: *django
+    command: celery -A proj worker -l INFO -Q celery,high,topic_q,extra -c 2 --without-gossip --without-mingle --without-heartbeat
+    depends_on:
+      ctl: {condition: service_healthy}
+    stop_grace_period: 3s
+
+  gobeat:
+    <<: *gobeat
+    depends_on:
+      ctl: {condition: service_healthy}
+    ports: ["127.0.0.1:${GOBEAT_PORT:-19099}:9099"]
+
+  # second replica for the leadership tests
+  gobeat2:
+    <<: *gobeat
+    profiles: [replica]
+    depends_on:
+      ctl: {condition: service_healthy}
+
+  # shadow comparison: Python beat is authoritative, gobeat only logs
+  pybeat:
+    <<: *django
+    profiles: [shadow]
+    command: celery -A proj beat -l INFO --pidfile= -s /tmp/celerybeat-schedule
+    depends_on:
+      ctl: {condition: service_healthy}
+    stop_grace_period: 3s
+  gobeat-shadow:
+    <<: *gobeat
+    profiles: [shadow]
+    environment:
+      <<: *gobeat-env
+      GOBEAT_DRY_RUN: "1"
+      GOBEAT_LOG_LEVEL: info
+    depends_on:
+      ctl: {condition: service_healthy}
+
+secrets:
+  ca:
+    file: ${BUILD_CA_FILE:-/dev/null}
