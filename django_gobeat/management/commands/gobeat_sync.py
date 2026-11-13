@@ -5,8 +5,9 @@ from django.db import transaction
 
 
 class Command(BaseCommand):
-    help = ('Write the gobeat settings row and sync code-defined '
-            'beat_schedule entries into PeriodicTask. Run after migrate.')
+    help = ('Write the gobeat settings row and sync cron.py jobs and '
+            'code-defined beat_schedule entries. Runs automatically after '
+            '`migrate` (post_migrate) unless GOBEAT_AUTO_SYNC = False.')
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -70,7 +71,9 @@ class Command(BaseCommand):
                 PeriodicTask.objects.values_list('task', flat=True))
         referenced = sorted(referenced)
         data = build_settings(app, extra_task_names=referenced,
-                              include_broker_url=not opts['no_broker_url'])
+                              include_broker_url=not (
+                                  opts['no_broker_url'] or not getattr(
+                                      settings, 'GOBEAT_STORE_BROKER_URL', True)))
         version = version_hash(data)
 
         for warning in data['warnings']:

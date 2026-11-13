@@ -11,7 +11,7 @@ import (
 // Errors.
 var (
 	// ErrNoSettings: the settings row is missing (run `manage.py gobeat_sync`).
-	ErrNoSettings = errors.New("gobeat settings row not found: run `python manage.py migrate` and `python manage.py gobeat_sync` in the Django project first")
+	ErrNoSettings = errors.New("gobeat settings row not found: add 'django_gobeat' to INSTALLED_APPS and run `python manage.py migrate` (or `python manage.py gobeat_sync`) in the Django project first")
 	// ErrDuplicateRun: the journal already holds this (task, scheduled time).
 	ErrDuplicateRun = errors.New("run already journaled")
 )

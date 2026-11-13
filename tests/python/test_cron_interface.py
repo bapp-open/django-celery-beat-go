@@ -104,3 +104,36 @@ def test_beat_schedule_entries_can_be_synced_as_jobs(db_ready):
                                    task='t', args='[]', kwargs='{}', headers='{}')}
     created, _, _, errors = cron.sync_jobs(extra)
     assert errors == [] and Job.objects.get(name='from-settings').minute == '*/5'
+
+
+def test_migrate_alone_syncs_settings_and_jobs(db_ready, capsys):
+    """post_migrate hook: no separate gobeat_sync step is needed."""
+    from django.core.management import call_command
+    from django_gobeat.models import GobeatSettings
+
+    GobeatSettings.objects.all().delete()
+    call_command('migrate', verbosity=1)
+    out = capsys.readouterr().out
+    assert 'cron jobs: 2 discovered, 2 created' in out and 'gobeat settings written' in out
+    row = GobeatSettings.objects.get(key='default')
+    assert row.data['schema'] == 1 and 'sampleapp.cron.Nightly' in row.data['tasks']
+    assert row.data['versions']['django_celery_beat'] is None      # not installed here
+    assert Job.objects.filter(source='code').count() == 2
+
+    # running it again changes nothing
+    call_command('migrate', verbosity=1)
+    assert 'gobeat settings unchanged' in capsys.readouterr().out
+
+
+def test_auto_sync_can_be_disabled_and_never_breaks_migrate(db_ready, settings_override, capsys):
+    from django.core.management import call_command
+    from django_gobeat.models import GobeatSettings
+
+    GobeatSettings.objects.all().delete()
+    settings_override(GOBEAT_AUTO_SYNC=False)
+    call_command('migrate', verbosity=0)
+    assert not GobeatSettings.objects.exists() and not Job.objects.exists()
+
+    settings_override(GOBEAT_AUTO_SYNC=True, GOBEAT_CELERY_APP='does.not:exist')
+    call_command('migrate', verbosity=0)             # must not raise
+    assert 'automatic sync after migrate failed' in capsys.readouterr().err

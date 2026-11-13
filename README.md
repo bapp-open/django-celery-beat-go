@@ -30,7 +30,7 @@ copied from) are in [docs/DESIGN.md](docs/DESIGN.md).
 ## How it fits together
 
 ```
-manage.py migrate && manage.py gobeat_sync      (Django project, at deploy)
+manage.py migrate                               (Django project, at deploy; syncs on post_migrate)
         │ writes one JSON row: broker, timezone, queues, per-task routing
         ▼
    Postgres  ◀── LISTEN/NOTIFY + polling ──  gobeat container  ──▶ Redis / RabbitMQ ──▶ workers
@@ -68,8 +68,8 @@ class Heartbeat(CronInterface):
 * Project conventions go into your own base class: mark it
   `abstract = True` and override `get_schedule()`, `get_args()`,
   `get_kwargs()`, `get_headers()`, `is_enabled()` or `run()`.
-* `manage.py gobeat_sync` writes the discovered jobs to
-  `django_gobeat_job` (creating, updating and removing rows to match the
+* After `migrate` (or with `manage.py gobeat_sync`) the discovered jobs
+  are written to `django_gobeat_job` (creating, updating and removing rows to match the
   code; run counts and the admin's *paused* switch are kept). Jobs can
   also be created by hand in the admin (`source = admin`).
 * Without django-celery-beat, entries of `app.conf.beat_schedule` are
@@ -88,16 +88,22 @@ class Heartbeat(CronInterface):
    # optional: GOBEAT_CELERY_APP = "proj.celery:app"  (default: celery.current_app)
    ```
 
-2. Run, on every deploy, after `migrate`:
+2. Run `migrate` on every deploy, as you already do:
 
    ```sh
    python manage.py migrate
-   python manage.py gobeat_sync        # prints warnings for anything it cannot resolve exactly
    ```
 
-   `gobeat_sync` writes the `cron.py` jobs, and code-defined
-   `beat_schedule` entries into `PeriodicTask` as Python beat does on
-   start-up (`DatabaseScheduler.setup_schedule`).
+   django_gobeat hooks `post_migrate` (which fires even when there is
+   nothing to migrate) and then writes the settings row, the `cron.py`
+   jobs and — as Python beat does on start-up — code-defined
+   `beat_schedule` entries. Warnings are printed for anything it cannot
+   resolve exactly; a failure is reported but never breaks the migration.
+   The same step is available as `python manage.py gobeat_sync`
+   (`--dry-run` prints the settings document, `--strict` fails on
+   warnings). Settings: `GOBEAT_AUTO_SYNC = False` disables the hook,
+   `GOBEAT_STORE_BROKER_URL = False` keeps the broker URL out of the row,
+   `GOBEAT_CELERY_APP = "proj.celery:app"` names the app explicitly.
 
 3. **Shadow first.** Keep Python beat running and start gobeat beside it
    in dry-run mode; it logs what it would dispatch and writes nothing:
@@ -159,8 +165,8 @@ else comes from the settings row and environment variables override it.
 | `GOBEAT_SETTINGS_OVERRIDE` | – | JSON object merged over the settings document |
 
 The broker URL (with its password) is part of the settings row; use
-`gobeat_sync --no-broker-url` and `GOBEAT_BROKER_URL` to keep it out of
-the database.
+`GOBEAT_STORE_BROKER_URL = False` (or `gobeat_sync --no-broker-url`) and
+`GOBEAT_BROKER_URL` to keep it out of the database.
 
 gobeat **refuses to start**, with an explanatory error, when the settings
 row is missing, the django-celery-beat schema is unknown, the versions are

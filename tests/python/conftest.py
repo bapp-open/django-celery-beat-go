@@ -15,6 +15,10 @@ def pytest_configure():
         DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
         DEFAULT_AUTO_FIELD='django.db.models.BigAutoField',
     )
+    # a configured Celery app, as a project's celery.py would create
+    from celery import Celery
+    app = Celery('tests', broker='memory://', set_as_current=True)
+    app.conf.task_default_queue = 'celery'
     django.setup()
     from django.core.management import call_command
     call_command('migrate', verbosity=0)
@@ -29,3 +33,21 @@ def db_ready():
     Job.objects.all().delete()
     yield
     Job.objects.all().delete()
+
+
+@pytest.fixture
+def settings_override():
+    from django.conf import settings
+    missing = object()
+    saved = {}
+
+    def apply(**values):
+        for k, v in values.items():
+            saved.setdefault(k, getattr(settings, k, missing))
+            setattr(settings, k, v)
+    yield apply
+    for k, v in saved.items():
+        if v is missing:
+            delattr(settings, k)
+        else:
+            setattr(settings, k, v)

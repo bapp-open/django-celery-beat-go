@@ -66,12 +66,12 @@ services:
       timeout: 10s
       retries: 40
 
-  # migrate + gobeat_sync, then stay up as the "admin" the tests drive
+  # `migrate` alone: django_gobeat syncs on post_migrate. Then stay up as
+  # the "admin" the tests drive.
   ctl:
     <<: *django
     command: >
       sh -c "python manage.py migrate --noinput &&
-             python manage.py gobeat_sync &&
              touch /tmp/ready && sleep infinity"
     healthcheck:
       test: ["CMD", "test", "-f", "/tmp/ready"]
