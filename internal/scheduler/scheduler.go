@@ -81,8 +81,33 @@ type Scheduler struct {
 	pub     broker.Publisher
 	pubVer  string
 
+	// cache of per-row derived data (parsed crontab, validated message),
+	// reused across reloads while the row's definition is unchanged
+	cache    map[int64]*cached
+	cacheVer string
+
 	// dry-run memory across reloads (Python keeps state in memory too)
 	dryLast map[int64]dryState
+}
+
+type cached struct {
+	row  store.Task // definition the cache entry was built from
+	cron *schedule.Crontab
+	err  error
+}
+
+// sameDefinition reports whether two rows describe the same schedule and
+// message (everything except the run bookkeeping).
+func sameDefinition(a, b *store.Task) bool {
+	eqS := func(x, y *string) bool { return (x == nil) == (y == nil) && (x == nil || *x == *y) }
+	eqI := func(x, y *int64) bool { return (x == nil) == (y == nil) && (x == nil || *x == *y) }
+	eqT := func(x, y *time.Time) bool { return (x == nil) == (y == nil) && (x == nil || x.Equal(*y)) }
+	eqC := func(x, y *store.CronRow) bool { return (x == nil) == (y == nil) && (x == nil || *x == *y) }
+	return a.Name == b.Name && a.Task == b.Task && eqI(a.IntervalEvery, b.IntervalEvery) &&
+		eqS(a.IntervalPeriod, b.IntervalPeriod) && eqC(a.Cron, b.Cron) && eqT(a.ClockedTime, b.ClockedTime) &&
+		a.Solar == b.Solar && a.Args == b.Args && a.Kwargs == b.Kwargs && eqS(a.Headers, b.Headers) &&
+		eqS(a.Queue, b.Queue) && eqS(a.Exchange, b.Exchange) && eqS(a.RoutingKey, b.RoutingKey) &&
+		eqI(a.Priority, b.Priority) && eqT(a.Expires, b.Expires) && eqI(a.ExpireSeconds, b.ExpireSeconds)
 }
 
 type dryState struct {
@@ -500,9 +525,6 @@ func (r *run) loop(ctx context.Context) error {
 				wait = d
 			}
 		}
-		if d := r.lastFull.Add(SyncMaxInterval).Sub(now); d < wait {
-			wait = d
-		}
 		if wait <= 0 {
 			notified = false
 			continue
@@ -532,22 +554,53 @@ func (r *run) refuse(t *store.Task, err error) {
 	r.refused[t.ID] = msg
 }
 
-func (r *run) buildEntry(t store.Task) (*entry, error) {
+// buildEntry turns a row into a schedulable entry and validates that its
+// message can be built. Parsing and validation are cached per row
+// definition: a 10,000 task schedule is re-read every five minutes.
+func (r *run) buildEntry(t store.Task, now time.Time) (*entry, error) {
 	e := &entry{row: t}
 	e.spec = schedule.Spec{Enabled: t.Enabled, OneOff: t.OneOff, StartTime: t.StartTime, Expires: t.Expires,
 		LastRunAt: t.LastRunAt, DateChanged: t.DateChanged, TotalRunCount: t.TotalRunCount}
+	e.in = message.Input{ID: t.ID, Name: t.Name, Task: t.Task, Args: t.Args, Kwargs: t.Kwargs, Headers: t.Headers,
+		Queue: t.Queue, Exchange: t.Exchange, RoutingKey: t.RoutingKey, Priority: t.Priority,
+		Expires: t.Expires, ExpireSeconds: t.ExpireSeconds}
+
+	c := r.s.cache[t.ID]
+	if c == nil || !sameDefinition(&c.row, &t) {
+		c = &cached{row: t}
+		c.cron, c.err = r.define(&t)
+		if c.err == nil {
+			// Validate the message now so that an unsupported task is
+			// reported when it is loaded, not when it is due.
+			_, c.err = r.builder.Build(e.in, "00000000-0000-0000-0000-000000000000", now)
+		}
+		r.s.cache[t.ID] = c
+	}
+	if c.err != nil {
+		return nil, c.err
+	}
 	// PeriodicTask.scheduler: interval, crontab, solar, clocked - in that order.
 	switch {
 	case t.IntervalEvery != nil:
-		period := ""
-		if t.IntervalPeriod != nil {
-			period = *t.IntervalPeriod
+		e.spec.Kind = schedule.KindInterval
+		e.spec.Every, _ = schedule.IntervalDuration(*t.IntervalEvery, *t.IntervalPeriod)
+	case t.Cron != nil:
+		e.spec.Kind, e.spec.Cron = schedule.KindCrontab, c.cron
+	default:
+		e.spec.Kind, e.spec.ClockedTime = schedule.KindClocked, *t.ClockedTime
+	}
+	return e, nil
+}
+
+// define validates a row's schedule and parses its crontab.
+func (r *run) define(t *store.Task) (*schedule.Crontab, error) {
+	switch {
+	case t.IntervalEvery != nil:
+		if t.IntervalPeriod == nil {
+			return nil, fmt.Errorf("%w: interval without a period", schedule.ErrUnsupported)
 		}
-		d, err := schedule.IntervalDuration(*t.IntervalEvery, period)
-		if err != nil {
-			return nil, err
-		}
-		e.spec.Kind, e.spec.Every = schedule.KindInterval, d
+		_, err := schedule.IntervalDuration(*t.IntervalEvery, *t.IntervalPeriod)
+		return nil, err
 	case t.Cron != nil:
 		tz := r.env.AppTZ
 		if r.env.TZAware {
@@ -561,18 +614,13 @@ func (r *run) buildEntry(t store.Task) (*entry, error) {
 			return nil, fmt.Errorf("invalid crontab %q %q %q %q %q: %w", t.Cron.Minute, t.Cron.Hour,
 				t.Cron.DayOfMonth, t.Cron.MonthOfYear, t.Cron.DayOfWeek, err)
 		}
-		e.spec.Kind, e.spec.Cron = schedule.KindCrontab, c
+		return c, nil
 	case t.Solar:
 		return nil, fmt.Errorf("%w: solar schedules are not supported by gobeat", schedule.ErrUnsupported)
 	case t.ClockedTime != nil:
-		e.spec.Kind, e.spec.ClockedTime = schedule.KindClocked, *t.ClockedTime
-	default:
-		return nil, fmt.Errorf("%w: the task has no schedule", schedule.ErrUnsupported)
+		return nil, nil
 	}
-	e.in = message.Input{ID: t.ID, Name: t.Name, Task: t.Task, Args: t.Args, Kwargs: t.Kwargs, Headers: t.Headers,
-		Queue: t.Queue, Exchange: t.Exchange, RoutingKey: t.RoutingKey, Priority: t.Priority,
-		Expires: t.Expires, ExpireSeconds: t.ExpireSeconds}
-	return e, nil
+	return nil, fmt.Errorf("%w: the task has no schedule", schedule.ErrUnsupported)
 }
 
 func loadLocation(name string) (*time.Location, error) {
@@ -600,6 +648,11 @@ func (r *run) reload(ctx context.Context, reason string) error {
 	r.lastMarker, r.lastFull, r.lastPoll = st.Marker, now, now
 	o.Metrics.Add("gobeat_reloads_total", 1, "reason", reason)
 
+	if r.s.cache == nil || r.s.cacheVer != r.version {
+		// a different settings document can change what is valid
+		r.s.cache, r.s.cacheVer = map[int64]*cached{}, r.version
+	}
+	seenIDs := make(map[int64]struct{}, len(tasks))
 	r.heap = r.heap[:0]
 	stillRefused := map[int64]string{}
 	for i := range tasks {
@@ -620,12 +673,8 @@ func (r *run) reload(ctx context.Context, reason string) error {
 				}
 			}
 		}
-		e, err := r.buildEntry(t)
-		if err == nil {
-			// Validate the message now so that an unsupported task is
-			// reported when it is loaded, not when it is due.
-			_, err = r.builder.Build(e.in, "00000000-0000-0000-0000-000000000000", now)
-		}
+		seenIDs[t.ID] = struct{}{}
+		e, err := r.buildEntry(t, now)
 		var res schedule.Result
 		if err == nil {
 			res, err = e.spec.IsDue(r.env, now)
@@ -650,6 +699,11 @@ func (r *run) reload(ctx context.Context, reason string) error {
 		r.heap = append(r.heap, e)
 	}
 	r.refused = stillRefused
+	for id := range r.s.cache {
+		if _, ok := seenIDs[id]; !ok {
+			delete(r.s.cache, id)
+		}
+	}
 	for i, e := range r.heap {
 		e.idx = i
 	}
