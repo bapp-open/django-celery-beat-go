@@ -127,3 +127,33 @@ func IsoFormat(t time.Time, loc *time.Location) string {
 func TotalSeconds(d time.Duration) float64 {
 	return float64(d.Microseconds()) / 1e6
 }
+
+// IsoFormatNaive is datetime.isoformat() for a naive datetime.
+func IsoFormatNaive(w Wall) string {
+	s := fmt.Sprintf("%04d-%02d-%02dT%02d:%02d:%02d", w.Year, w.Month, w.Day, w.Hour, w.Minute, w.Second)
+	if w.Us != 0 {
+		s += fmt.Sprintf(".%06d", w.Us)
+	}
+	return s
+}
+
+// IsoFormatWall is isoformat() for the aware datetime with wall fields w
+// in loc and fold=0 - the result of `aware + timedelta`, which may sit in
+// a DST gap or overlap.
+func IsoFormatWall(w Wall, loc *time.Location) string {
+	off := offsetFold0(w.naive().Unix(), loc)
+	return IsoFormatNaive(w) + formatOffset(off)
+}
+
+func formatOffset(off int) string {
+	sign := byte('+')
+	if off < 0 {
+		sign = '-'
+		off = -off
+	}
+	s := fmt.Sprintf("%c%02d:%02d", sign, off/3600, off%3600/60)
+	if off%60 != 0 {
+		s += fmt.Sprintf(":%02d", off%60)
+	}
+	return s
+}

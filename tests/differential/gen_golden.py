@@ -245,7 +245,7 @@ class Out:
         self.n = 0
 
     def add(self, rec):
-        self.buf.write(json.dumps(rec, ensure_ascii=False, sort_keys=True))
+        self.buf.write(json.dumps(rec, ensure_ascii=True, sort_keys=True))
         self.buf.write('\n')
         self.n += 1
 
