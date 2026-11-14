@@ -4,4 +4,4 @@ kombu==5.7.0
 django-celery-beat==2.9.0
 Django>=5.2
 time-machine>=2.14
-pytest>=8
+pytest>=9.2.0
