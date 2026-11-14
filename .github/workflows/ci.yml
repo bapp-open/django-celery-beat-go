@@ -2,6 +2,8 @@ name: ci
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 5 * * 1"   # weekly: catch newly published vulnerabilities
 
 jobs:
   go:
@@ -19,6 +21,16 @@ jobs:
       - run: make pytest
       - run: make fuzz FUZZTIME=30s
       - run: make build
+
+  vulncheck:
+    name: known vulnerabilities (govulncheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   differential:
     name: goldens regenerated from real Celery (version matrix)
