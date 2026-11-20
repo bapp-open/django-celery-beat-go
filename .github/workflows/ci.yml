@@ -65,6 +65,8 @@ jobs:
         dcb: ["2.9.0"]
         include:
           - {broker: redis, celery: "5.7.0", dcb: "2.8.1"}
+          # Redis Sentinel: a replica + 3 Sentinels, graceful failover and master crash
+          - {broker: sentinel, celery: "5.7.0", dcb: "2.9.0"}
     env:
       BROKER: ${{ matrix.broker }}
       CELERY_VERSION: ${{ matrix.celery }}
@@ -80,7 +82,14 @@ jobs:
       - run: make build images
       - run: pip install pytest
       - working-directory: tests/integration
-        run: python -m pytest -x -q test_integration.py test_cron.py test_failures.py test_shadow.py
+        run: |
+          if [ "$BROKER" = sentinel ]; then
+            # test_failures stops "redis" to simulate a broker outage; with
+            # Sentinel that is a failover, covered by test_sentinel.py
+            python -m pytest -x -q test_integration.py test_cron.py test_sentinel.py
+          else
+            python -m pytest -x -q test_integration.py test_cron.py test_failures.py test_shadow.py
+          fi
       - name: without django-celery-beat installed
         if: matrix.broker == 'redis' && matrix.dcb == '2.9.0'
         env:

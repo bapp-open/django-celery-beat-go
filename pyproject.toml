@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-gobeat"
-version = "0.1.0"
+version = "0.2.0"
 description = "cron.py periodic jobs for Django + the companion app of gobeat, a small Go replacement for the celery beat process"
 readme = "README.md"
 license = "MIT"

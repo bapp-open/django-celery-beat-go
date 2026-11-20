@@ -118,6 +118,10 @@ of `time.Time.ZoneBounds`.
 the body is byte-identical and the properties/headers are field- and
 type-identical (py-amqp's table type tags are reproduced; table key order
 on the wire is not observable by consumers).
+With a `sentinel://` broker only the connection changes: the master is
+discovered from the Sentinels on every (re)connection
+(`internal/broker/sentinel.go`), the messages and keys are those of plain
+Redis.
 
 Unsupported inputs are never guessed: solar schedules, non-JSON
 serializers, unknown compression, kombu typed-JSON markers, fan-out
@@ -157,6 +161,7 @@ exchanges on Redis, etc. log an error naming the task and skip it.
 | JSON body | `kombu/utils/json.py`, `kombu/serialization.py` |
 | publish | `kombu/messaging.py: Producer.publish, _publish` |
 | Redis envelope, priority queues | `kombu/transport/virtual/base.py: Channel.prepare_message, basic_publish`; `kombu/transport/redis.py: Channel._put, _q_for_pri` |
+| Redis Sentinel master discovery | `kombu/transport/redis.py: SentinelChannel._sentinel_managed_pool`; `redis/sentinel.py: Sentinel.discover_master, check_master_state, SentinelManagedConnection.read_response` (redis-py 6.4.0) |
 | Redis exchange routing | `kombu/transport/virtual/exchange.py`; `kombu/transport/redis.py: get_table, _queue_bind` |
 | AMQP properties | `kombu/transport/pyamqp.py: Channel.prepare_message`; `amqp/basic_message.py`, `amqp/serialization.py` |
 | queue declaration | `kombu/entity.py: Queue.declare, Exchange.declare`; `kombu/common.py: maybe_declare` |

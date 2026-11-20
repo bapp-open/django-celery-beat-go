@@ -17,10 +17,20 @@ BROKER = os.environ.get('BROKER', 'redis')
 BROKER_URLS = {
     'redis': 'redis://redis:6379/0',
     'amqp': 'amqp://guest:guest@rabbitmq:5672//',
+    # the shape bapp_framework and kombu's docs use: one URL per Sentinel
+    'sentinel': ('sentinel://sentinel1:26379;sentinel://sentinel2:26379;'
+                 'sentinel://sentinel3:26379'),
 }
-ENV = dict(os.environ, BROKER_URL=BROKER_URLS[BROKER], COMPOSE_BAKE='false')
+TRANSPORT_OPTIONS = {
+    'sentinel': json.dumps({'master_name': 'mymaster'}),
+}
+ENV = dict(os.environ, BROKER_URL=BROKER_URLS[BROKER], COMPOSE_BAKE='false',
+           BROKER_TRANSPORT_OPTIONS=TRANSPORT_OPTIONS.get(BROKER, ''))
 GOBEAT_PORT = os.environ.get('GOBEAT_PORT', '19099')
-BROKER_SERVICE = 'redis' if BROKER == 'redis' else 'rabbitmq'
+# the service whose outage test_broker_down_and_back simulates
+BROKER_SERVICE = 'rabbitmq' if BROKER == 'amqp' else 'redis'
+SENTINEL_SERVICES = ('redis-replica', 'sentinel1', 'sentinel2', 'sentinel3')
+PROFILES = ('--profile', 'replica', '--profile', 'shadow', '--profile', 'sentinel')
 
 
 def sh(*cmd, check=True, env=None, timeout=180, input=None):
@@ -176,8 +186,10 @@ def assert_exactly_once(name, settle=4):
 
 @pytest.fixture(scope='session', autouse=True)
 def stack():
-    compose('--profile', 'replica', '--profile', 'shadow', 'down', '-v',
-            '--remove-orphans', check=False)
+    compose(*PROFILES, 'down', '-v', '--remove-orphans', check=False)
+    if BROKER == 'sentinel':
+        compose('--profile', 'sentinel', 'up', '-d', '--wait', 'redis',
+                *SENTINEL_SERVICES, timeout=300)
     compose('up', '-d', '--no-build', 'postgres', 'redis', 'rabbitmq', 'ctl',
             'worker', 'gobeat', timeout=600)
     wait_for(lambda: healthz()[0] == 200, timeout=60, what='gobeat healthy')
@@ -185,11 +197,13 @@ def stack():
     if os.environ.get('KEEP_STACK') != '1':
         art = os.path.join(HERE, '.artifacts')
         os.makedirs(art, exist_ok=True)
-        for svc in ('gobeat', 'worker', 'ctl'):
+        svcs = ('gobeat', 'worker', 'ctl')
+        if BROKER == 'sentinel':
+            svcs += ('redis',) + SENTINEL_SERVICES
+        for svc in svcs:
             with open(os.path.join(art, '%s-%s.log' % (BROKER, svc)), 'w') as fh:
-                fh.write(compose('logs', svc, check=False).stdout)
-        compose('--profile', 'replica', '--profile', 'shadow', 'down', '-v',
-                '--remove-orphans', check=False)
+                fh.write(compose(*PROFILES, 'logs', svc, check=False).stdout)
+        compose(*PROFILES, 'down', '-v', '--remove-orphans', check=False)
 
 
 @pytest.fixture(autouse=True)

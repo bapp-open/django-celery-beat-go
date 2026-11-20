@@ -1,3 +1,4 @@
+import json
 import os
 
 from kombu import Exchange, Queue
@@ -28,6 +29,9 @@ TIME_ZONE = os.environ.get('TIME_ZONE', 'Europe/Bucharest')
 DJANGO_CELERY_BEAT_TZ_AWARE = USE_TZ
 
 CELERY_BROKER_URL = os.environ['BROKER_URL']
+if os.environ.get('BROKER_TRANSPORT_OPTIONS'):
+    # {"master_name": "mymaster"} for the sentinel:// broker
+    CELERY_BROKER_TRANSPORT_OPTIONS = json.loads(os.environ['BROKER_TRANSPORT_OPTIONS'])
 CELERY_TIMEZONE = TIME_ZONE
 if WITH_DCB:
     CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
