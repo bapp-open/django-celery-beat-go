@@ -1,7 +1,8 @@
 # Integration environment: Postgres, Redis, RabbitMQ, a real Django
 # project with Celery workers, gobeat, and (profile "shadow") Python beat.
 #
-#   BROKER=redis|amqp  USE_TZ=1|0  docker compose up -d --build
+#   BROKER=redis|amqp|sentinel  USE_TZ=1|0  docker compose up -d --build
+# (BROKER=sentinel also needs the "sentinel" profile: a replica + 3 Sentinels)
 name: gobeat-it
 
 x-django: &django
@@ -17,6 +18,7 @@ x-django: &django
   image: gobeat-it-django:${CELERY_VERSION:-5.7.0}-${DCB_VERSION:-2.9.0}
   environment: &django-env
     BROKER_URL: ${BROKER_URL:-redis://redis:6379/0}
+    BROKER_TRANSPORT_OPTIONS: ${BROKER_TRANSPORT_OPTIONS:-}
     USE_TZ: ${USE_TZ:-1}
     WITH_DCB: ${WITH_DCB:-1}
     TIME_ZONE: ${TIME_ZONE:-Europe/Bucharest}
@@ -51,11 +53,56 @@ services:
       retries: 60
   redis:
     image: redis:7-alpine
+    # Announce the service name: once this node is a replica (after a
+    # Sentinel failover), Sentinel reports it by an address the other
+    # containers can reach.
+    command: redis-server --replica-announce-ip redis
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 1s
       timeout: 3s
       retries: 60
+
+  # BROKER=sentinel: redis is the initial master, redis-replica follows it
+  # and three Sentinels watch them as "mymaster" (with hostnames, the way
+  # the valkey-ha chart runs them).
+  redis-replica:
+    image: redis:7-alpine
+    profiles: [sentinel]
+    command: redis-server --replicaof redis 6379 --replica-announce-ip redis-replica
+    depends_on:
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  sentinel1: &sentinel
+    image: redis:7-alpine
+    profiles: [sentinel]
+    command:
+      - sh
+      - -c
+      - >-
+        printf '%s\n'
+        'port 26379'
+        'sentinel resolve-hostnames yes'
+        'sentinel announce-hostnames yes'
+        'sentinel monitor mymaster redis 6379 2'
+        'sentinel down-after-milliseconds mymaster 1000'
+        'sentinel failover-timeout mymaster 5000'
+        'sentinel parallel-syncs mymaster 1'
+        > /tmp/sentinel.conf && exec redis-sentinel /tmp/sentinel.conf
+    depends_on:
+      redis-replica: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -p 26379 sentinel get-master-addr-by-name mymaster | grep -q 6379"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  sentinel2: *sentinel
+  sentinel3: *sentinel
+
   rabbitmq:
     image: rabbitmq:3.13-alpine
     healthcheck:

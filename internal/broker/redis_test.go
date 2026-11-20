@@ -23,7 +23,9 @@ type fakeRedis struct {
 	lists map[string][]string
 	sets  map[string]map[string]bool
 	cmds  []string
-	wg    sync.WaitGroup
+	// readonly makes writes fail like a replica (a demoted master) does.
+	readonly bool
+	wg       sync.WaitGroup
 }
 
 func newFakeRedis(t *testing.T) *fakeRedis {
@@ -70,7 +72,15 @@ func (f *fakeRedis) serve(c net.Conn) {
 		f.mu.Lock()
 		f.cmds = append(f.cmds, args[0])
 		var reply string
-		switch strings.ToUpper(args[0]) {
+		cmd := strings.ToUpper(args[0])
+		if f.readonly && (cmd == "LPUSH" || cmd == "SADD") {
+			f.mu.Unlock()
+			if _, err := c.Write([]byte("-READONLY You can't write against a read only replica.\r\n")); err != nil {
+				return
+			}
+			continue
+		}
+		switch cmd {
 		case "LPUSH":
 			f.lists[args[1]] = append([]string{args[2]}, f.lists[args[1]]...)
 			reply = ":" + strconv.Itoa(len(f.lists[args[1]])) + "\r\n"

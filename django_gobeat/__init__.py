@@ -3,7 +3,7 @@
 It owns two tables (the settings row gobeat reads at start-up and the
 dispatch journal gobeat writes) and the ``gobeat_sync`` management command.
 """
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 
 #: Version of the JSON document stored in ``GobeatSettings.data``.
 SETTINGS_SCHEMA = 1

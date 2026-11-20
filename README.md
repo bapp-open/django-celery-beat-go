@@ -34,8 +34,9 @@ docker run -e DATABASE_URL=postgres://… ghcr.io/bapp-open/django-celery-beat-g
 
 ## What it does not do
 
-* **Only PostgreSQL** as the Django database; **only Redis and RabbitMQ**
-  as brokers (no SQS, no Redis Sentinel/Cluster, one broker URL).
+* **Only PostgreSQL** as the Django database; **only Redis (plain or
+  behind Sentinel) and RabbitMQ** as brokers (no SQS, no Redis Cluster,
+  no failover lists other than Sentinel nodes).
 * **Only the latest stable Celery** (5.7.x). It refuses to start on other
   versions instead of guessing.
 * **JSON task messages only**; no pickle/yaml/msgpack serializers, no
@@ -186,8 +187,8 @@ else comes from the settings row and environment variables override it.
 | `GOBEAT_LOG_LEVEL` / `GOBEAT_LOG_FORMAT` | `info` / `json` | |
 | `GOBEAT_ALLOW_UNSUPPORTED_VERSIONS` | `0` | run against untested Celery/django-celery-beat versions |
 | **overrides of the settings row** | | |
-| `GOBEAT_BROKER_URL` | row | `redis://`, `rediss://`, `amqp://`, `amqps://` |
-| `GOBEAT_BROKER_TRANSPORT_OPTIONS` | row | JSON (`priority_steps`, `sep`, `global_keyprefix`) |
+| `GOBEAT_BROKER_URL` | row | `redis://`, `rediss://`, `amqp://`, `amqps://`, `sentinel://…[;sentinel://…]` |
+| `GOBEAT_BROKER_TRANSPORT_OPTIONS` | row | JSON (`priority_steps`, `sep`, `global_keyprefix`; Sentinel: `master_name`, `min_other_sentinels`, `sentinel_kwargs`) |
 | `GOBEAT_TIMEZONE` | row | `CELERY_TIMEZONE` |
 | `GOBEAT_MAX_LOOP_INTERVAL` | row (5) | seconds, `beat_max_loop_interval` |
 | `GOBEAT_CRON_STARTING_DEADLINE` | row | seconds, `beat_cron_starting_deadline` |
@@ -196,6 +197,29 @@ else comes from the settings row and environment variables override it.
 The broker URL (with its password) is part of the settings row; use
 `GOBEAT_STORE_BROKER_URL = False` (or `gobeat_sync --no-broker-url`) and
 `GOBEAT_BROKER_URL` to keep it out of the database.
+
+### Redis Sentinel
+
+The broker URL kombu's Sentinel transport takes works unchanged:
+
+```python
+CELERY_BROKER_URL = "sentinel://:pass@s1:26379/0;sentinel://s2:26379;sentinel://s3:26379"
+CELERY_BROKER_TRANSPORT_OPTIONS = {"master_name": "mymaster"}
+```
+
+As in kombu (`SentinelChannel`) and redis-py (`Sentinel.discover_master`):
+the Sentinels are every `sentinel://` entry (port 26379 by default); they
+are asked in order with `SENTINEL MASTERS`, and the first one reporting
+`master_name` as a master that is not `s_down`/`o_down` and sees at least
+`min_other_sentinels` other Sentinels wins (and is asked first next time).
+The master's password and database come from the first URL; the Sentinels
+get only `sentinel_kwargs` (`username`, `password`, `socket_timeout`,
+`socket_connect_timeout`; anything else is refused). Sentinel is asked
+again on every reconnection, and a `READONLY` reply (a demoted master)
+drops the connection — so after a failover the next attempt reaches the
+new master, while claimed runs wait in the journal. Messages are the same
+as on plain Redis. Not supported: `broker_use_ssl` with Sentinel, and
+mixing `sentinel://` with other URLs.
 
 gobeat **refuses to start**, with an explanatory error, when the settings
 row is missing, the django-celery-beat schema is unknown, the versions are
@@ -269,7 +293,8 @@ Deliberate:
    skips it.
 6. **Refused at start-up**: `USE_TZ` ≠ `DJANGO_CELERY_BEAT_TZ_AWARE`,
    `enable_utc=False` without `CELERY_TIMEZONE`, `task_always_eager`,
-   task protocol 1, several broker URLs, other transports.
+   task protocol 1, several broker URLs (except a list of Sentinel
+   nodes), other transports.
 
 Not reproduced (things only a Python process can do):
 
@@ -324,7 +349,7 @@ as a failing golden case.
 | soak | `make test`, `make soak-golden` | real `DatabaseScheduler.tick()` on a fake clock vs gobeat's simulation over 30 simulated days: identical dispatch counts for every task (1,000 tasks, 1.24 M dispatches; and 10,000 tasks, 12.4 M dispatches, with a flat heap) |
 | version matrix | `make matrix` | goldens regenerated under each supported version must be byte-identical |
 | Django app | `make pytest` | `cron.py` discovery, `CronInterface`, job sync |
-| integration | `make integration` | docker compose: Postgres, Redis, RabbitMQ, a Django project, real workers — on both brokers, plus a pass with django-celery-beat not installed |
+| integration | `make integration` | docker compose: Postgres, Redis, RabbitMQ, a Django project, real workers — on both brokers and on Redis Sentinel (graceful failover and master crash), plus a pass with django-celery-beat not installed |
 | failure injection | `make integration` | database down/up, broker down/up, SIGKILL between claim and publish and between publish and journal mark, network partition, two instances with failover, missed-run policies; clock jumps on a fake clock in `internal/scheduler` |
 | shadow | `make integration` | Python beat and gobeat dry-run side by side, logs compared with `gobeat shadow-diff` |
 
