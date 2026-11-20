@@ -22,7 +22,11 @@ BROKER_URLS = {
                  'sentinel://sentinel3:26379'),
 }
 TRANSPORT_OPTIONS = {
-    'sentinel': json.dumps({'master_name': 'mymaster'}),
+    # Socket timeouts as a real deployment sets them (bapp_framework: 2 s):
+    # without them the *worker* blocks forever on a frozen master. Above
+    # kombu's 1 s BRPOP poll. gobeat reads only master_name here.
+    'sentinel': json.dumps({'master_name': 'mymaster', 'socket_timeout': 5,
+                            'socket_connect_timeout': 5}),
 }
 ENV = dict(os.environ, BROKER_URL=BROKER_URLS[BROKER], COMPOSE_BAKE='false',
            BROKER_TRANSPORT_OPTIONS=TRANSPORT_OPTIONS.get(BROKER, ''))

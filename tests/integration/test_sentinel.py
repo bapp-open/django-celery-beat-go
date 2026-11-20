@@ -74,9 +74,21 @@ def failover(trigger, name):
 
     start = time.time()
     trigger(old)
-    new = wait_for(lambda: master() != old and master(), timeout=60,
-                   what='Sentinel to promote the replica')
+    try:
+        new = wait_for(lambda: master() != old and master(), timeout=60,
+                       what='Sentinel to promote the replica')
+    except AssertionError as e:
+        tails = '\n'.join(
+            compose('--profile', 'sentinel', 'logs', '--tail', '25', s, check=False).stdout
+            for s in ('sentinel1', 'sentinel2', 'sentinel3'))
+        raise AssertionError('%s\n--- Sentinel logs ---\n%s' % (e, tails)) from None
     end = time.time()
+
+    # gobeat itself: runs claimed after the promotion reach the new master
+    # (published), whatever the workers are doing
+    wait_for(lambda: len([x for x in journal(name)
+                          if x['claimed_ts'] > end and x['published_at']]) >= 3,
+             timeout=30, what='gobeat to publish to the new master %s' % new)
 
     n = len(runs(name))
     wait_for(lambda: len(runs(name)) >= n + 5, timeout=90,
@@ -96,16 +108,25 @@ def test_sentinel_graceful_failover():
     assert {old, new} == {'redis', 'redis-replica'}
 
 
-def test_sentinel_master_crash():
-    stopped = []
+def test_sentinel_master_hangs():
+    """The master stops answering (frozen: the host hangs, or a partition).
 
-    def crash(old):
-        compose('--profile', 'sentinel', 'kill', old)
-        stopped.append(old)
+    `pause`, not `kill`: a killed container's name stops resolving, and
+    Sentinel (resolve-hostnames) resolves synchronously in its event loop;
+    where Docker's DNS is slow to answer NXDOMAIN (GitHub runners) that
+    stalls the Sentinels themselves. Cluster DNS answers at once. A frozen
+    master is also the harder case for gobeat: publishes time out instead
+    of being refused.
+    """
+    paused = []
+
+    def hang(old):
+        compose('--profile', 'sentinel', 'pause', old)
+        paused.append(old)
 
     try:
-        failover(crash, unique('crash'))
+        failover(hang, unique('hang'))
     finally:
-        # bring the old master back; Sentinel turns it into a replica
-        for svc in stopped:
-            compose('--profile', 'sentinel', 'start', svc)
+        # thaw the old master; Sentinel turns it into a replica
+        for svc in paused:
+            compose('--profile', 'sentinel', 'unpause', svc)
