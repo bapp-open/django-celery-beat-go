@@ -10,7 +10,7 @@ jobs:
     name: unit, differential, soak (race + leak checks), fuzz
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -26,7 +26,7 @@ jobs:
     name: known vulnerabilities (govulncheck)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -43,7 +43,7 @@ jobs:
         image: rabbitmq:3.13-alpine
         ports: ["5672:5672"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
@@ -72,7 +72,7 @@ jobs:
       CELERY_VERSION: ${{ matrix.celery }}
       DCB_VERSION: ${{ matrix.dcb }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
