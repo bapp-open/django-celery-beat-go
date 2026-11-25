@@ -231,7 +231,7 @@ func (s *session) Settings(context.Context) ([]byte, string, error) {
 	return s.db.settings, s.db.version, nil
 }
 
-func (s *session) CheckSchema(context.Context, bool, bool) error {
+func (s *session) CheckSchema(context.Context, bool, bool, string) error {
 	defer s.db.mu.Unlock()
 	return s.begin("schema")
 }

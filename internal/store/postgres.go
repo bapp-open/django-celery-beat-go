@@ -107,6 +107,41 @@ type pg struct {
 	key     string
 	ts      string // "timestamptz" or "timestamp" (USE_TZ=False)
 	dcb     bool   // django-celery-beat tables are in use
+	// local is set when USE_TZ=False meets `timestamp with time zone`
+	// columns - what Django creates on PostgreSQL whatever USE_TZ says.
+	// Django then writes and reads naive values in its connection's zone
+	// (TIME_ZONE), so the session runs in that zone and a stored instant is
+	// read as its wall time there: the naive value Python beat sees, which
+	// it takes as UTC (maybe_make_aware).
+	local *time.Location
+}
+
+// utc turns a value read from the database into gobeat's UTC.
+func (s *pg) utc(t time.Time) time.Time {
+	if s.local == nil {
+		return t.UTC()
+	}
+	w := t.In(s.local)
+	return time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), w.Second(), w.Nanosecond(), time.UTC)
+}
+
+func (s *pg) utcp(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := s.utc(*t)
+	return &u
+}
+
+// seenCol is the column side of a compare-and-swap on last_run_at. With
+// local set the comparison is on wall time: a value read back from the
+// repeated autumn hour must match the row it came from, and converting the
+// parameter back to an instant could pick the other occurrence.
+func (s *pg) seenCol() string {
+	if s.local != nil {
+		return "last_run_at::timestamp"
+	}
+	return "last_run_at"
 }
 
 func (s *pg) Close() {
@@ -146,8 +181,9 @@ type SchemaError struct{ Msg string }
 
 func (e *SchemaError) Error() string { return "unknown database schema: " + e.Msg }
 
-func (s *pg) CheckSchema(ctx context.Context, useTZ, useDCB bool) error {
+func (s *pg) CheckSchema(ctx context.Context, useTZ, useDCB bool, dbTimeZone string) error {
 	s.dcb = useDCB
+	s.local = nil
 	required := map[string][]string{}
 	for t, c := range gobeatColumns {
 		required[t] = c
@@ -219,12 +255,7 @@ func (s *pg) CheckSchema(ctx context.Context, useTZ, useDCB bool) error {
 		}
 		return &SchemaError{"missing column(s): " + strings.Join(missing, ", ") + hint}
 	}
-	wantType := "timestamp with time zone"
-	s.ts = "timestamptz"
-	if !useTZ {
-		wantType = "timestamp without time zone"
-		s.ts = "timestamp"
-	}
+	const aware, naive = "timestamp with time zone", "timestamp without time zone"
 	check := []string{"django_gobeat_job.last_run_at", "django_gobeat_job.date_changed",
 		"django_gobeat_dispatch.scheduled_for", "django_gobeat_dispatch.claimed_at"}
 	if useDCB {
@@ -232,10 +263,41 @@ func (s *pg) CheckSchema(ctx context.Context, useTZ, useDCB bool) error {
 			"django_celery_beat_periodictask.expires", "django_celery_beat_periodictask.date_changed",
 			"django_celery_beat_clockedschedule.clocked_time", "django_celery_beat_periodictasks.last_update")
 	}
+	wantType := aware
+	s.ts = "timestamptz"
+	if !useTZ {
+		// Naive values are exchanged as `timestamp` either way. On
+		// PostgreSQL Django creates `timestamp with time zone` columns even
+		// with USE_TZ=False; other column types come from schemas made
+		// outside Django.
+		s.ts = "timestamp"
+		wantType = naive
+		if have[check[0]] == aware {
+			wantType = aware
+		}
+	}
 	for _, c := range check {
 		if have[c] != wantType {
 			return &SchemaError{fmt.Sprintf("column %s is %q but the settings row says USE_TZ=%v (expected %q); re-run gobeat_sync", c, have[c], useTZ, wantType)}
 		}
+	}
+	if !useTZ && wantType == aware {
+		if dbTimeZone == "" {
+			return &SchemaError{"USE_TZ=False with `timestamp with time zone` columns needs the connection time zone in the settings row; upgrade django-gobeat to >= 0.2.1 and re-run gobeat_sync"}
+		}
+		loc, err := time.LoadLocation(dbTimeZone)
+		if err != nil {
+			return &SchemaError{fmt.Sprintf("db_time_zone %q: %v", dbTimeZone, err)}
+		}
+		// Django's own session setting for this connection
+		// (DatabaseWrapper.ensure_timezone). Session-level, so it holds for
+		// every later statement on this connection.
+		if _, err := s.conn.Exec(ctx, "SELECT set_config('TimeZone', $1, false)", dbTimeZone); err != nil {
+			return err
+		}
+		s.local = loc
+	} else if _, err := s.conn.Exec(ctx, "SELECT set_config('TimeZone', 'UTC', false)"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -266,7 +328,7 @@ func (s *pg) State(ctx context.Context) (State, error) {
 		return st, err
 	}
 	if st.Marker != nil {
-		t := st.Marker.UTC()
+		t := s.utc(*st.Marker)
 		st.Marker = &t
 	}
 	if version != nil {
@@ -287,14 +349,6 @@ LEFT JOIN django_celery_beat_crontabschedule c ON c.id = t.crontab_id
 LEFT JOIN django_celery_beat_clockedschedule k ON k.id = t.clocked_id
 WHERE t.enabled
 ORDER BY t.id`
-
-func utcp(t *time.Time) *time.Time {
-	if t == nil {
-		return nil
-	}
-	u := t.UTC()
-	return &u
-}
 
 const jobsSQL = `SELECT id, name, task, kind, minute, hour, day_of_week, day_of_month, month_of_year, timezone,
 	every_microseconds, COALESCE(args, ''), COALESCE(kwargs, ''), headers, queue, exchange, routing_key, priority,
@@ -336,8 +390,8 @@ func (s *pg) jobs(ctx context.Context) ([]Task, error) {
 		case "crontab":
 			t.Cron = &CronRow{minute, hour, dow, dom, moy, tz}
 		}
-		t.Expires, t.StartTime, t.LastRunAt = utcp(t.Expires), utcp(t.StartTime), utcp(t.LastRunAt)
-		t.DateChanged = t.DateChanged.UTC()
+		t.Expires, t.StartTime, t.LastRunAt = s.utcp(t.Expires), s.utcp(t.StartTime), s.utcp(t.LastRunAt)
+		t.DateChanged = s.utc(t.DateChanged)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -379,8 +433,8 @@ func (s *pg) Tasks(ctx context.Context) ([]Task, error) {
 			}
 			t.Cron = &CronRow{d(minute), d(hour), d(dow), d(dom), d(moy), d(tz)}
 		}
-		t.Expires, t.StartTime, t.LastRunAt, t.ClockedTime = utcp(t.Expires), utcp(t.StartTime), utcp(t.LastRunAt), utcp(t.ClockedTime)
-		t.DateChanged = t.DateChanged.UTC()
+		t.Expires, t.StartTime, t.LastRunAt, t.ClockedTime = s.utcp(t.Expires), s.utcp(t.StartTime), s.utcp(t.LastRunAt), s.utcp(t.ClockedTime)
+		t.DateChanged = s.utc(t.DateChanged)
 		t.Source = SourceDCB
 		out = append(out, t)
 	}
@@ -403,12 +457,12 @@ func (s *pg) Claim(ctx context.Context, c Claim) (bool, int64, error) {
 	q := fmt.Sprintf(`WITH claimed AS (
 		UPDATE %[2]s
 		SET last_run_at = $1::%[1]s, total_run_count = total_run_count + 1%[4]s
-		WHERE id = $2 AND %[3]s AND last_run_at IS NOT DISTINCT FROM $3::%[1]s
+		WHERE id = $2 AND %[3]s AND %[5]s IS NOT DISTINCT FROM $3::%[1]s
 		RETURNING id)
 	INSERT INTO django_gobeat_dispatch
 		(source, periodic_task_id, name, task, task_id, scheduled_for, claimed_at, attempts, last_error, message)
 	SELECT $9, id, $4, $5, $6, $7::%[1]s, $1::%[1]s, 0, '', $8::jsonb FROM claimed
-	RETURNING id`, s.ts, table, guard, touch)
+	RETURNING id`, s.ts, table, guard, touch, s.seenCol())
 	source := c.Source
 	if source == "" {
 		source = SourceDCB
@@ -432,7 +486,7 @@ func (s *pg) Claim(ctx context.Context, c Claim) (bool, int64, error) {
 func (s *pg) Skip(ctx context.Context, source string, id int64, seen *time.Time, now time.Time) (bool, error) {
 	table, guard, touch := s.table(source)
 	q := fmt.Sprintf(`UPDATE %[2]s SET last_run_at = $1::%[1]s%[4]s
-		WHERE id = $2 AND %[3]s AND last_run_at IS NOT DISTINCT FROM $3::%[1]s`, s.ts, table, guard, touch)
+		WHERE id = $2 AND %[3]s AND %[5]s IS NOT DISTINCT FROM $3::%[1]s`, s.ts, table, guard, touch, s.seenCol())
 	tag, err := s.conn.Exec(ctx, q, now, id, seen)
 	if err != nil {
 		return false, err
@@ -474,7 +528,7 @@ func (s *pg) Pending(ctx context.Context) ([]Pending, error) {
 		if err := rows.Scan(&p.JournalID, &p.PeriodicTaskID, &p.TaskID, &p.Name, &p.ClaimedAt, &p.Attempts, &msg); err != nil {
 			return nil, err
 		}
-		p.ClaimedAt = p.ClaimedAt.UTC()
+		p.ClaimedAt = s.utc(p.ClaimedAt)
 		p.Message = []byte(msg)
 		out = append(out, p)
 	}

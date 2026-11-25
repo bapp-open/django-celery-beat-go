@@ -55,7 +55,7 @@ jobs:
         run: make soak-check
 
   integration:
-    name: integration + failure injection + shadow (${{ matrix.broker }}, celery ${{ matrix.celery }}, dcb ${{ matrix.dcb }})
+    name: integration + failure injection + shadow (${{ matrix.broker }}, celery ${{ matrix.celery }}, dcb ${{ matrix.dcb }}, USE_TZ ${{ matrix.use_tz || '1' }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -67,8 +67,12 @@ jobs:
           - {broker: redis, celery: "5.7.0", dcb: "2.8.1"}
           # Redis Sentinel: a replica + 3 Sentinels, graceful failover and master crash
           - {broker: sentinel, celery: "5.7.0", dcb: "2.9.0"}
+          # USE_TZ=False: Django still makes `timestamp with time zone`
+          # columns on PostgreSQL and exchanges naive values in TIME_ZONE
+          - {broker: amqp, celery: "5.7.0", dcb: "2.9.0", use_tz: "0"}
     env:
       BROKER: ${{ matrix.broker }}
+      USE_TZ: ${{ matrix.use_tz || '1' }}
       CELERY_VERSION: ${{ matrix.celery }}
       DCB_VERSION: ${{ matrix.dcb }}
     steps:
@@ -83,7 +87,12 @@ jobs:
       - run: pip install pytest
       - working-directory: tests/integration
         run: |
-          if [ "$BROKER" = sentinel ]; then
+          if [ "$USE_TZ" = 0 ]; then
+            # the other suites create rows with last_run_at NULL, whose first
+            # run Python beat itself places TIME_ZONE's offset late with
+            # USE_TZ=False (naive date_changed read as UTC)
+            python -m pytest -x -q test_naive.py
+          elif [ "$BROKER" = sentinel ]; then
             # test_failures stops "redis" to simulate a broker outage; with
             # Sentinel that is a failover, covered by test_sentinel.py
             python -m pytest -x -q test_integration.py test_cron.py test_sentinel.py
@@ -101,5 +110,5 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: logs-${{ matrix.broker }}-${{ matrix.celery }}-${{ matrix.dcb }}
+          name: logs-${{ matrix.broker }}-${{ matrix.celery }}-${{ matrix.dcb }}-tz${{ matrix.use_tz || '1' }}
           path: tests/integration/.artifacts/*.log

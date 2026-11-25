@@ -69,6 +69,8 @@ integration: build images venv
 	cd tests/integration && BROKER=redis ../../$(PY) -m pytest -x -q $(TESTS)
 	cd tests/integration && BROKER=amqp  ../../$(PY) -m pytest -x -q $(TESTS)
 	cd tests/integration && BROKER=sentinel ../../$(PY) -m pytest -x -q test_integration.py test_cron.py test_sentinel.py
+	# USE_TZ=False: `timestamp with time zone` columns, naive values in TIME_ZONE
+	cd tests/integration && USE_TZ=0 BROKER=amqp ../../$(PY) -m pytest -x -q test_naive.py
 	# the same stack with django-celery-beat not installed at all
 	DCB_VERSION=none tests/integration/build.sh
 	cd tests/integration && WITH_DCB=0 DCB_VERSION=none BROKER=redis ../../$(PY) -m pytest -x -q test_nodcb.py test_cron.py

@@ -4,11 +4,21 @@
 
 The JSON is a list of operations; the result is printed as JSON.
 """
+import datetime
 import json
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
+
+
+def beat_now():
+    """django_celery_beat ModelEntry._default_now(): aware with
+    DJANGO_CELERY_BEAT_TZ_AWARE, else naive UTC."""
+    from django.conf import settings
+    if getattr(settings, 'DJANGO_CELERY_BEAT_TZ_AWARE', True):
+        return timezone.now()
+    return datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
 
 
 class Command(BaseCommand):
@@ -46,6 +56,10 @@ class Command(BaseCommand):
                 if 'solar' in fields:
                     fields['solar'], _ = SolarSchedule.objects.get_or_create(
                         **fields.pop('solar'))
+                if 'last_run_ago' in fields:
+                    # what Python beat stores: ModelEntry._default_now()
+                    fields['last_run_at'] = beat_now() - timedelta(
+                        seconds=fields.pop('last_run_ago'))
                 for key in ('start_in', 'expires_in'):
                     if key in fields:
                         target = 'start_time' if key == 'start_in' else 'expires'
@@ -63,6 +77,12 @@ class Command(BaseCommand):
                     setattr(pt, k, v)
                 pt.save()
                 out.append(pt.pk)
+            elif kind == 'get':
+                # a row as Django reads it: naive values with USE_TZ=False
+                pt = PeriodicTask.objects.get(name=op['name'])
+                out.append({'last_run_at': pt.last_run_at and pt.last_run_at.isoformat(),
+                            'beat_now': beat_now().isoformat(),
+                            'total_run_count': pt.total_run_count})
             elif kind == 'delete':
                 PeriodicTask.objects.get(name=op['name']).delete()
                 out.append(None)
