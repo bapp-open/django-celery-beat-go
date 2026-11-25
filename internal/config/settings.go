@@ -81,8 +81,12 @@ type Settings struct {
 	EnableUTC              bool              `json:"enable_utc"`
 	UseTZ                  bool              `json:"use_tz"`
 	TZAware                bool              `json:"tz_aware"`
-	BeatMaxLoopInterval    float64           `json:"beat_max_loop_interval"`
-	BeatCronDeadline       *float64          `json:"beat_cron_starting_deadline"`
+	// DBTimeZone is the session time zone of Django's connection when
+	// USE_TZ is False (TIME_ZONE): with PostgreSQL's `timestamp with time
+	// zone` columns, naive values are written and read in that zone.
+	DBTimeZone          *string  `json:"db_time_zone"`
+	BeatMaxLoopInterval float64  `json:"beat_max_loop_interval"`
+	BeatCronDeadline    *float64 `json:"beat_cron_starting_deadline"`
 
 	TaskDefaultQueue        string  `json:"task_default_queue"`
 	TaskDefaultExchange     *string `json:"task_default_exchange"`

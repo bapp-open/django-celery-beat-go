@@ -197,6 +197,18 @@ def _dcb_version():
     return django_celery_beat.__version__
 
 
+def _db_time_zone(dj_settings):
+    """The session time zone Django gives the default connection when
+    USE_TZ is False (BaseDatabaseWrapper.timezone_name), else None."""
+    if getattr(dj_settings, 'USE_TZ', False):
+        return None
+    from django.db import DEFAULT_DB_ALIAS, connections
+    try:
+        return connections[DEFAULT_DB_ALIAS].timezone_name or None
+    except Exception:  # noqa: BLE001 - no database configured
+        return getattr(dj_settings, 'TIME_ZONE', None) or None
+
+
 def build_settings(app, extra_task_names=(), include_broker_url=True):
     """Return the settings document for ``app``."""
     import celery
@@ -307,6 +319,11 @@ def build_settings(app, extra_task_names=(), include_broker_url=True):
         'use_tz': bool(getattr(dj_settings, 'USE_TZ', False)),
         'tz_aware': bool(getattr(dj_settings, 'DJANGO_CELERY_BEAT_TZ_AWARE',
                                  True)),
+        # USE_TZ = False on PostgreSQL: Django still creates `timestamp with
+        # time zone` columns and reads and writes naive values in the
+        # connection's time zone (TIME_ZONE). gobeat sets its session to the
+        # same zone so it sees the naive values Python beat sees.
+        'db_time_zone': _db_time_zone(dj_settings),
         # django_celery_beat/schedulers.py: DatabaseScheduler.__init__
         'beat_max_loop_interval': conf.beat_max_loop_interval or 5,
         'beat_cron_starting_deadline': (

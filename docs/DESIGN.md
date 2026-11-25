@@ -109,6 +109,19 @@ defence.
 behaviour. Intervals are elapsed time (`add_seconds_to_datetime`). `internal/pytime` implements it on top
 of `time.Time.ZoneBounds`.
 
+### USE_TZ = False
+
+Python beat then works in naive datetimes and takes every naive value as UTC
+(`maybe_make_aware`). On PostgreSQL Django still creates `timestamp with time
+zone` columns; it sets its session to `TIME_ZONE` and exchanges naive values in
+that zone. `gobeat_sync` records that zone as `db_time_zone`, gobeat sets the
+same session time zone, writes naive values as `timestamp` (Postgres converts
+them exactly as it does Django's) and reads a stored instant back as its wall
+time there, labelled UTC - the value Python beat reads. The compare-and-swap on
+`last_run_at` compares wall times, so a value from the repeated autumn hour
+still matches its row. `timestamp without time zone` columns (schemas made
+outside Django) are exchanged as UTC wall time.
+
 ## Messages
 
 `internal/message` ports `Task.apply_async` → `Celery.send_task` →

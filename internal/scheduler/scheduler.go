@@ -379,7 +379,11 @@ func (s *Scheduler) session(ctx context.Context) error {
 	if settings.TaskAlwaysEager {
 		return &FatalError{errors.New("task_always_eager is set: Python beat would execute tasks inline, which gobeat cannot do")}
 	}
-	if err := st.CheckSchema(ctx, settings.UseTZ, useDCB); err != nil {
+	dbTimeZone := ""
+	if settings.DBTimeZone != nil {
+		dbTimeZone = *settings.DBTimeZone
+	}
+	if err := st.CheckSchema(ctx, settings.UseTZ, useDCB, dbTimeZone); err != nil {
 		var se *store.SchemaError
 		if errors.As(err, &se) {
 			return &FatalError{err}

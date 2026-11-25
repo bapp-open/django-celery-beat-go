@@ -116,8 +116,10 @@ type Store interface {
 	Settings(ctx context.Context) (data []byte, version string, err error)
 	// CheckSchema verifies that the django_gobeat tables - and, when
 	// useDCB is set (django-celery-beat is installed), its tables - look
-	// like a schema this binary knows. useTZ is Django's USE_TZ.
-	CheckSchema(ctx context.Context, useTZ, useDCB bool) error
+	// like a schema this binary knows. useTZ is Django's USE_TZ; dbTimeZone
+	// is the zone Django's connection uses for naive values when useTZ is
+	// false ("" if the settings row predates it).
+	CheckSchema(ctx context.Context, useTZ, useDCB bool, dbTimeZone string) error
 	// State returns the change marker and settings version.
 	State(ctx context.Context) (State, error)
 	// Tasks loads all enabled periodic tasks.
